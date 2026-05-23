@@ -1,0 +1,17 @@
+# Backend config template. Copy this file to backends/<your-name>.hcl,
+# fill in the storage account/container, then run:
+#
+#   terraform init -backend-config=backends/<your-name>.hcl [-reconfigure]
+#
+# Prerequisites: create the Resource Group, Storage Account, and Container in
+# the target subscription first. See docs/remote-state.md for the one-time
+# bootstrap commands. The storage account must have blob versioning enabled
+# for state-file safety.
+#
+# Files matching backends/*.hcl are gitignored to keep subscription IDs out of
+# git. Only backends/*.hcl.example files are committed.
+
+resource_group_name  = "fortiaigate-tfstate"
+storage_account_name = "fortiaigatetfstate<suffix>"
+container_name       = "tfstate"
+key                  = "fortiaigate-aks.tfstate"

@@ -1,0 +1,98 @@
+.codex
+.kuberlr
+.terraform/
+# .terraform.lock.hcl is tracked in git for reproducible provider selections.
+# Run `terraform init -upgrade` to refresh it.
+
+# Large vendor artifacts
+*.tar
+*.tar.gz
+*.tgz
+*.img
+*.iso
+
+# Helm package output
+*.tgz
+*.prov
+
+# Certificates, keys, and local secret material
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.truststore
+*.csr
+*.srl
+# The chart's bundled dflt.crt / dflt.key are intentionally excluded.
+# Terraform generates a fresh self-signed cert at apply time (tls.tf) and passes
+# it to the chart via tls.existingSecret, so the bundled key is never used.
+
+# License files
+*.lic
+*.license
+
+# Terraform state files — contain plaintext secrets (license data, TLS keys,
+# storage account keys, Helm values). Never commit. Use remote state
+# (Azure Storage Account blob with native lease locking) for shared access.
+# See docs/remote-state.md.
+terraform.tfstate
+terraform.tfstate.backup
+*.tfstate
+*.tfstate.backup
+crash.log
+crash.*.log
+# Local override files — machine-specific, not for sharing
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local env and Azure credential helpers
+.env
+.env.*
+*.local
+*.local.yaml
+*.local.yml
+*.local.json
+# ARM_* env vars are typically sourced from one of these files. Never commit.
+azure.env
+.azure/
+
+# Per-subscription variable files — contain subscription IDs, Key Vault refs,
+# certificate names, node names. Commit *.tfvars.example files as templates;
+# keep actual values local.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+# Example scenarios in examples/ are placeholders meant to be committed.
+!examples/**/*.tfvars
+
+# Per-subscription backend configs — contain storage account names and
+# subscription IDs. Commit backends/*.hcl.example as templates; keep actual
+# configs local.
+backends/*.hcl
+!backends/*.hcl.example
+
+# kube and render output
+*.kubeconfig
+rendered-*.yaml
+*.rendered.yaml
+helm-template*.yaml
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python cache if helper scripts are used locally
+__pycache__/
+*.pyc
+
+# Claude Code local settings — user-specific permissions/overrides.
+# Commit .claude/settings.json (shared config) but not the .local.* variant.
+.claude/settings.local.json

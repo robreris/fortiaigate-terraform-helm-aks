@@ -1,0 +1,84 @@
+{{- $className := .Values.ingress.className }}
+{{- $defaultAnnotations := dict }}
+{{- if eq $className "alb" }}
+{{- $_ := set $defaultAnnotations "kubernetes.io/ingress.class" "alb" }}
+{{- $_ := set $defaultAnnotations "alb.ingress.kubernetes.io/scheme" "internet-facing" }}
+{{- $_ := set $defaultAnnotations "alb.ingress.kubernetes.io/target-type" "ip" }}
+{{- if .Values.tls.enabled }}
+{{- $_ := set $defaultAnnotations "alb.ingress.kubernetes.io/backend-protocol" "HTTPS" }}
+{{- $_ := set $defaultAnnotations "alb.ingress.kubernetes.io/healthcheck-protocol" "HTTPS" }}
+{{- end }}
+{{- else if eq $className "nginx" }}
+{{- if .Values.tls.enabled }}
+{{- $_ := set $defaultAnnotations "nginx.ingress.kubernetes.io/backend-protocol" "HTTPS" }}
+{{- $_ := set $defaultAnnotations "nginx.ingress.kubernetes.io/healthcheck-protocol" "HTTPS" }}
+{{- $_ := set $defaultAnnotations "nginx.ingress.kubernetes.io/ssl-redirect" "true" }}
+{{- $_ := set $defaultAnnotations "nginx.ingress.kubernetes.io/force-ssl-redirect" "false" }}
+{{- end }}
+{{- else if eq $className "traefik" }}
+{{- if .Values.tls.enabled }}
+{{- $_ := set $defaultAnnotations "traefik.ingress.kubernetes.io/router.entrypoints" "websecure" }}
+{{- $_ := set $defaultAnnotations "traefik.ingress.kubernetes.io/router.middlewares" "default-redirect-https@kubernetescrd" }}
+{{- end }}
+{{- end }}
+{{- $annotations := mergeOverwrite (dict) $defaultAnnotations (.Values.ingress.annotations | default dict) }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fortiaigate-ingress
+  labels:
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+  {{- if $annotations }}
+  annotations:
+    {{- range $key, $value := $annotations }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+  {{- end }}
+
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+
+  {{- if and .Values.tls.enabled (ne .Values.ingress.className "alb") }}
+  tls:
+  - hosts:
+    {{- if .Values.ingress.host }}
+    - {{ .Values.ingress.host }}
+    {{- else }}
+    - "*.local"
+    {{- end }}
+    secretName: {{ include "fortiaigate.tlsSecretName" . }}
+  {{- end }}
+
+  rules:
+    {{- if .Values.ingress.host }}
+    - host: {{ .Values.ingress.host }}
+      http:
+    {{- else }}
+    - http:
+    {{- end }}
+        paths:
+          - path: /v1/
+            pathType: Prefix
+            backend:
+              service:
+                name: core
+                port:
+                  number: 8080
+          - path: /api/
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: webui
+                port:
+                  number: 3000
