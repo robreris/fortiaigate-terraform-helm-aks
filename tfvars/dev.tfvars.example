@@ -11,7 +11,13 @@ image_repository = "<acr-name>.azurecr.io/fortiaigate"
 # Infrastructure
 # ---------------------------------------------------------------------------
 
-location            = "eastus"
+location = "eastus"
+
+# resource_group_name is the cluster RG. This is the ONLY RG that
+# `terraform destroy` touches. Keep it distinct from:
+#   - the Terraform state RG (docs/remote-state.md, typically fortiaigate-tfstate)
+#   - the ACR RG (docs/registry-and-images.md, typically fortiaigate-acr)
+# Mixing any of these means `terraform destroy` takes out state or images.
 resource_group_name = "fortiaigate-dev"
 cluster_name        = "fortiaigate-dev"
 image_tag           = "V8.0.0-build0024"

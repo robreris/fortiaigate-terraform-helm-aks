@@ -3,7 +3,11 @@
 
 image_repository = "<acr-name>.azurecr.io/fortiaigate"
 
-location            = "eastus"
+location = "eastus"
+
+# Cluster RG only. Keep distinct from the tfstate RG (docs/remote-state.md)
+# and the ACR RG (docs/registry-and-images.md) — `terraform destroy` will
+# delete everything in this RG.
 resource_group_name = "fortiaigate-prod"
 cluster_name        = "fortiaigate-prod"
 image_tag           = "V8.0.0-build0024"

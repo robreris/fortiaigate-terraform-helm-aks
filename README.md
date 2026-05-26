@@ -1,6 +1,6 @@
 # fortiaigate-terraform-helm-aks
 
-Terraform stack that deploys FortiAIGate on Azure AKS. Sibling to [`fortiaigate-terraform-helm-eks`](https://github.com/robreris/fortiaigate-terraform-helm-eks) — the Helm chart in `fortiaigate/` is the same; only the infrastructure layer differs.
+Terraform stack that deploys FortiAIGate on Azure AKS.
 
 ## What you get
 
@@ -19,7 +19,7 @@ Terraform stack that deploys FortiAIGate on Azure AKS. Sibling to [`fortiaigate-
 - Azure CLI signed in (`az login`) with rights to:
   - Create resource groups, VNets, AKS clusters, role assignments, and storage accounts in the target subscription.
   - The signed-in principal becomes the AKS cluster admin via the default AAD passthrough behavior.
-- A container registry holding the FortiAIGate images (typically an Azure Container Registry — `<name>.azurecr.io`). The AKS kubelet identity must have `AcrPull` on it; that role assignment is **not** managed by this stack and must be granted separately.
+- A container registry holding the FortiAIGate images (typically an Azure Container Registry — `<name>.azurecr.io`). The AKS kubelet identity must have `AcrPull` on it; that role assignment is **not** managed by this stack and must be granted separately. See [docs/registry-and-images.md](docs/registry-and-images.md) for creating the registry, pushing the images, and granting `AcrPull`.
 - One-time per-subscription bootstrap of remote state: a Resource Group, Storage Account, and Container for the Terraform state blob — see [docs/remote-state.md](docs/remote-state.md).
 - Service principal with the right roles — see [docs/permissions-preflight.md](docs/permissions-preflight.md) to verify before your first apply.
 
@@ -96,20 +96,6 @@ terraform destroy -var-file=tfvars/dev.tfvars
 ```
 
 The Azure Files storage account is part of the resource group and goes away with `destroy`. The PVs have `Retain` set, so the underlying shares survive until the storage account itself is dropped; back them up first if you need their contents.
-
-## Differences from the EKS stack
-
-| Concern | EKS stack | This stack |
-|---------|-----------|------------|
-| Cluster module | `terraform-aws-modules/eks/aws` | Native `azurerm_kubernetes_cluster` |
-| Network module | `terraform-aws-modules/vpc/aws` | Native `azurerm_virtual_network` + subnets |
-| Shared RWX storage | EFS + EFS CSI addon + IRSA | Azure Files + built-in azurefile-csi + kubelet role assignments |
-| Ingress controller | AWS Load Balancer Controller via Helm + IRSA | AGIC via the AKS addon |
-| Identity for workloads | IRSA (OIDC + IAM role) | Workload Identity (OIDC + Azure AD app) — enabled but not yet consumed by the chart |
-| State backend | S3 + DynamoDB lock | Azure Storage Account blob (native lease-based locking) |
-| Node naming for licenses | `ip-10-0-1-100.us-east-1.compute.internal` | `aks-app-12345678-vmss000000` |
-
-Anything not listed should behave identically since the chart is shared.
 
 ## License
 

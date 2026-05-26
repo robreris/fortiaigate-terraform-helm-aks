@@ -17,9 +17,9 @@ variable "cluster_name" {
 }
 
 variable "kubernetes_version" {
-  description = "Kubernetes version for the AKS cluster"
+  description = "Kubernetes version for the AKS cluster. Azure aggressively deprecates older minors per region — verify with `az aks get-versions --location <region> -o table` before pinning."
   type        = string
-  default     = "1.31"
+  default     = "1.35"
 }
 
 variable "app_node_vm_size" {

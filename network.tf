@@ -3,7 +3,8 @@ resource "azurerm_resource_group" "this" {
   location = var.location
 
   tags = {
-    "kubernetes.io/cluster" = var.cluster_name
+    cluster    = var.cluster_name
+    managed-by = "terraform"
   }
 }
 
