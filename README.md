@@ -40,7 +40,16 @@ terraform apply \
   -target=azurerm_subnet.aks \
   -target=azurerm_subnet.appgw \
   -target=azurerm_kubernetes_cluster.this \
+  -target=azurerm_kubernetes_cluster_node_pool.gpu \
   -var-file=tfvars/dev.tfvars
+
+# (drop the gpu node pool target if gpu_enabled = false — it resolves to zero
+#  resources and the target is harmlessly ignored, so it's safe to leave in)
+
+# Both node pools now exist. Discover node names and set var.licenses before
+# the full apply (see node-keyed licensing notes):
+#   $(terraform output -raw configure_kubectl)
+#   kubectl get nodes -o custom-columns=NAME:.metadata.name,ROLE:.metadata.labels.fortiaigate-role --no-headers
 
 terraform apply -var-file=tfvars/dev.tfvars
 
@@ -53,6 +62,8 @@ terraform output ingress_address
 ### Why two steps?
 
 The `helm` and `kubernetes` providers in `providers.tf` read connection details from `azurerm_kubernetes_cluster.this.kube_config`. On a clean apply the cluster doesn't exist yet, so any single-shot run fails when Terraform tries to plan the helm/kubernetes resources. Bootstrap the infra first, then apply the rest. Subsequent applies don't need targeting.
+
+Only the helm/kubernetes resources have to wait — every `azurerm` resource can go in step 1. The GPU node pool (`azurerm_kubernetes_cluster_node_pool.gpu`) is therefore included in the first apply so **both** node pools exist before the full apply. That's what lets you discover the real node names and populate `var.licenses` between the two steps (node-keyed licensing). If the GPU pool is left for the second apply, its node name isn't knowable until the same apply that also wires in the licenses, which makes the hostname-affinity licensing impossible to satisfy on first deploy.
 
 ## Per-subscription layout
 

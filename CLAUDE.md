@@ -38,7 +38,9 @@ The user authenticates Terraform via service principal env vars: `ARM_CLIENT_ID`
 terraform init -backend-config=backends/<subscription>.hcl -reconfigure
 
 # First-time deploy MUST be two-step — see "Two-step apply" below
-terraform apply -target=azurerm_resource_group.this -target=azurerm_virtual_network.this -target=azurerm_subnet.aks -target=azurerm_subnet.appgw -target=azurerm_kubernetes_cluster.this -var-file=tfvars/<subscription>.tfvars
+terraform apply -target=azurerm_resource_group.this -target=azurerm_virtual_network.this -target=azurerm_subnet.aks -target=azurerm_subnet.appgw -target=azurerm_kubernetes_cluster.this -target=azurerm_kubernetes_cluster_node_pool.gpu -var-file=tfvars/<subscription>.tfvars
+# (the gpu pool target resolves to zero resources when gpu_enabled = false, so it's safe to leave in)
+# Both node pools now exist — discover node names and set var.licenses before the full apply.
 terraform apply -var-file=tfvars/<subscription>.tfvars
 
 # Configure kubectl after cluster exists
@@ -54,6 +56,8 @@ Teardown order matters — uninstall Helm releases first, then `terraform destro
 ## Two-step apply (critical)
 
 The `helm` and `kubernetes` providers in `providers.tf` authenticate via the kubeconfig emitted by `azurerm_kubernetes_cluster.this.kube_config`. On a first apply the cluster doesn't exist yet, so any single-shot `terraform apply` will fail trying to plan helm/kubernetes resources. Always bootstrap the resource group, network, and AKS cluster first, then apply the rest. Subsequent applies can be single-step.
+
+Only the helm/kubernetes resources are subject to this — every `azurerm` resource can go in the first apply, and the GPU node pool (`azurerm_kubernetes_cluster_node_pool.gpu`) deliberately does. Putting both node pools up in step 1 is what makes node-keyed licensing work: the GPU node name is discoverable between the two applies, so `var.licenses` can be populated before the full apply renders the hostname `nodeAffinity` blocks. If the GPU pool is deferred to the second apply, its node name only exists in the same apply that consumes the licenses, so the affinity can never be satisfied on a first deploy and the GPU node ends up unschedulable/reclaimed.
 
 If a previous apply errored partway through the network resources, the AKS cluster will fail to create with subnet validation errors. Re-run `terraform apply -target=azurerm_subnet.aks -target=azurerm_subnet.appgw` before re-attempting the full apply.
 
@@ -83,6 +87,8 @@ To switch subscriptions: `az account set --subscription <id>`, then `terraform i
 **Licenses are node-keyed.** `var.licenses` maps AKS node names (e.g. `aks-app-12345678-vmss000000`) to local license file paths. `licenses.tf` reads each file and stuffs it in a `fortiaigate-license-config` ConfigMap; the license-manager DaemonSet uses node affinity on the names to deliver the right license to each node. Node names must match `kubectl get nodes` output exactly — they're discovered post-apply, so the initial deploy runs without licenses and a second apply adds them. Note: AKS VMSS-generated node names change when node pools are upgraded or scaled in, so license assignments may need re-keying after pool churn.
 
 **GPU is optional and tainted.** `var.gpu_enabled = true` adds a single-node `Standard_NC6s_v3` pool by default, tainted `fortiaigate-gpu=true:NoSchedule`. Terraform also installs the NVIDIA device plugin Helm release with matching tolerations. Triton is the only workload scheduled there. AKS does not ship a GPU-specific Ubuntu image variant — the standard AKS image plus the NVIDIA device plugin DaemonSet handles driver installation.
+
+The GPU node pool pins `gpu_driver = "Install"` (`aks.tf`). This is mandatory, not cosmetic: azurerm records `gpu_driver` as `"Install"` when a GPU pool is created, the field is ForceNew, and leaving it unset makes the provider plan it to `null` — which silently schedules a **destroy/recreate of the pool on the next apply**. That replacement hands the node a new name and re-keys (i.e. breaks) the hostname-affinity licensing. Keep the argument set.
 
 **Storage account naming has a hard 24-char limit.** `local.storage_account_name` strips non-alphanumerics from `var.cluster_name`, appends an 8-char random suffix, then truncates. If you change `cluster_name`, the random suffix changes too and Terraform will plan to replace the storage account — destroying all PVC data on it. Lift-and-shift between cluster names requires migrating the shares first.
 

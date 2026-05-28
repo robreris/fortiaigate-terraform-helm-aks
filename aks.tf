@@ -61,6 +61,12 @@ resource "azurerm_kubernetes_cluster_node_pool" "gpu" {
   vm_size               = var.gpu_node_vm_size
   vnet_subnet_id        = azurerm_subnet.aks.id
   os_disk_size_gb       = var.gpu_node_disk_size_gb
+
+  # Pin the AKS-managed NVIDIA driver install. azurerm records this as "Install"
+  # on creation; leaving it unset makes the provider plan it to null, and the
+  # field is ForceNew — so omitting it triggers a destructive pool replacement
+  # (and a new node name, which re-keys licenses) on the very next apply.
+  gpu_driver = "Install"
   auto_scaling_enabled  = true
   min_count             = 0
   max_count             = 1

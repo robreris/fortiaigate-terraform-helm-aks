@@ -43,9 +43,23 @@ resource "azurerm_storage_account" "fortiaigate" {
   }
 }
 
-# Grant the AKS kubelet identity (the identity nodes use to call Azure APIs)
-# permission to manage and mount file shares in this storage account. Without
-# this, dynamic provisioning by azurefile-csi will fail with AuthorizationFailed.
+# Azure File CSI splits work across TWO AKS identities, and both need a grant:
+#
+#   - Dynamic provisioning (the controller's management-plane call to CREATE the
+#     file share, Microsoft.Storage/.../shares/write) runs as the cluster
+#     CONTROL-PLANE identity. Without a role here the PVC stays Pending with
+#     "AuthorizationFailed" on .../fileServices/shares.
+#   - Mounting the share on the node (data plane / SMB) runs as the KUBELET
+#     identity.
+#
+# Granting only the kubelet identity (the intuitive choice) leaves provisioning
+# broken — that was the original miss. Both assignments below are required.
+resource "azurerm_role_assignment" "cluster_storage_contributor" {
+  scope                = azurerm_storage_account.fortiaigate.id
+  role_definition_name = "Storage Account Contributor"
+  principal_id         = azurerm_kubernetes_cluster.this.identity[0].principal_id
+}
+
 resource "azurerm_role_assignment" "kubelet_storage_contributor" {
   scope                = azurerm_storage_account.fortiaigate.id
   role_definition_name = "Storage Account Contributor"
@@ -93,6 +107,7 @@ resource "kubernetes_storage_class" "azurefile" {
   ]
 
   depends_on = [
+    azurerm_role_assignment.cluster_storage_contributor,
     azurerm_role_assignment.kubelet_storage_contributor,
     azurerm_role_assignment.kubelet_smb_share_contributor,
   ]
