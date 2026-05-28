@@ -13,8 +13,8 @@ resource "azurerm_kubernetes_cluster" "this" {
   workload_identity_enabled = true
 
   default_node_pool {
-    name            = "app"
-    vm_size         = var.app_node_vm_size
+    name    = "app"
+    vm_size = var.app_node_vm_size
     # Pinned to a fixed node count (min = max = app_node_count). FortiAIGate's
     # node-keyed licensing pins every pod (via a hostname nodeAffinity built from
     # the licensed node names) to licensed nodes only — so an unlicensed extra
@@ -83,11 +83,11 @@ resource "azurerm_kubernetes_cluster_node_pool" "gpu" {
   # on creation; leaving it unset makes the provider plan it to null, and the
   # field is ForceNew — so omitting it triggers a destructive pool replacement
   # (and a new node name, which re-keys licenses) on the very next apply.
-  gpu_driver = "Install"
-  auto_scaling_enabled  = true
-  min_count             = 0
-  max_count             = 1
-  node_count            = 1
+  gpu_driver           = "Install"
+  auto_scaling_enabled = true
+  min_count            = 0
+  max_count            = 1
+  node_count           = 1
 
   node_labels = {
     fortiaigate-role = "gpu"

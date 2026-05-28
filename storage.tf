@@ -87,9 +87,9 @@ resource "kubernetes_storage_class" "azurefile" {
   allow_volume_expansion = true
 
   parameters = {
-    skuName            = "Premium_LRS"
-    storageAccount     = azurerm_storage_account.fortiaigate.name
-    resourceGroup      = azurerm_resource_group.this.name
+    skuName        = "Premium_LRS"
+    storageAccount = azurerm_storage_account.fortiaigate.name
+    resourceGroup  = azurerm_resource_group.this.name
     # Use SMB protocol (default). For NFSv4.1, set protocol = "nfs" and ensure
     # account_kind = "FileStorage" + a private endpoint or service endpoint.
     protocol = "smb"
