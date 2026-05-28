@@ -1,4 +1,8 @@
-# fortiaigate-terraform-helm-aks
+# FortiAIGate on Azure AKS — Terraform + Helm
+
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![Terraform](https://img.shields.io/badge/terraform-%E2%89%A51.5-623CE4.svg)](https://www.terraform.io/)
+[![Kubernetes](https://img.shields.io/badge/kubernetes-1.31-326CE5.svg)](https://kubernetes.io/)
 
 Terraform stack that deploys FortiAIGate on Azure AKS.
 
@@ -6,8 +10,8 @@ Terraform stack that deploys FortiAIGate on Azure AKS.
 
 - A resource group holding the VNet, AKS cluster, Azure Files storage account, and (optionally) the Application Gateway.
 - AKS cluster with:
-  - An `app` node pool (default 2x `Standard_D16s_v5`) for FortiAIGate core services and the Bitnami PostgreSQL/Redis subcharts.
-  - An optional `gpu` node pool (default 1x `Standard_NC6s_v3`) for Triton inference, tainted so only GPU workloads land there.
+  - An `app` node pool (default 1x `Standard_D16s_v5`, `max_pods` raised to 110) for FortiAIGate core services and the Bitnami PostgreSQL/Redis subcharts. Sized to the number of app-node licenses — node-keyed licensing pins all pods to licensed nodes, so the full service set runs on the one licensed node.
+  - An optional `gpu` node pool (default 1x `Standard_NV36ads_A10_v5`, an A10) for Triton inference, tainted so only GPU workloads land there. The GPU must be a Fortinet-supported model with ≥24 GB VRAM and SM 75+ — see [docs/gpu-triton-compatibility.md](docs/gpu-triton-compatibility.md).
   - OIDC issuer and workload identity enabled (AKS analogue of EKS IRSA).
   - AGIC addon (optional) — AKS provisions and manages an Application Gateway in a dedicated subnet.
 - A Premium Azure Files storage account, the kubelet identity role assignments needed for dynamic file-share provisioning, and an `azurefile-fortiaigate` StorageClass.
@@ -19,7 +23,8 @@ Terraform stack that deploys FortiAIGate on Azure AKS.
 - Azure CLI signed in (`az login`) with rights to:
   - Create resource groups, VNets, AKS clusters, role assignments, and storage accounts in the target subscription.
   - The signed-in principal becomes the AKS cluster admin via the default AAD passthrough behavior.
-- A container registry holding the FortiAIGate images (typically an Azure Container Registry — `<name>.azurecr.io`). The AKS kubelet identity must have `AcrPull` on it; that role assignment is **not** managed by this stack and must be granted separately. See [docs/registry-and-images.md](docs/registry-and-images.md) for creating the registry, pushing the images, and granting `AcrPull`.
+- A container registry holding the FortiAIGate images (typically an Azure Container Registry — `<name>.azurecr.io`). The AKS kubelet identity must have `AcrPull` on it or every pod stalls in `ImagePullBackOff`. This stack **can** codify that grant: set `acr_id` in your tfvars and the kubelet identity is granted `AcrPull` automatically (the Terraform SP then needs role-assignment write on the ACR's scope). Leave `acr_id` empty if the ACR and its grant are managed in another stack. See [docs/registry-and-images.md](docs/registry-and-images.md) for creating the registry, pushing the images, and the grant.
+- **GPU quota (if `gpu_enabled = true`).** The default GPU SKU is an A10 (`Standard_NV36ads_A10_v5`), and the A10/A100 vCPU quota families default to **0** in most regions — request a quota increase (e.g. *Standard NVADSA10v5 Family vCPUs* → 36) in the target region **before** the first apply, or step 1 fails creating the GPU pool. See [docs/gpu-triton-compatibility.md](docs/gpu-triton-compatibility.md).
 - One-time per-subscription bootstrap of remote state: a Resource Group, Storage Account, and Container for the Terraform state blob — see [docs/remote-state.md](docs/remote-state.md).
 - Service principal with the right roles — see [docs/permissions-preflight.md](docs/permissions-preflight.md) to verify before your first apply.
 
@@ -50,6 +55,9 @@ terraform apply \
 # the full apply (see node-keyed licensing notes):
 #   $(terraform output -raw configure_kubectl)
 #   kubectl get nodes -o custom-columns=NAME:.metadata.name,ROLE:.metadata.labels.fortiaigate-role --no-headers
+#
+# If gpu_enabled = true, var.licenses must include the aks-gpu-* node too;
+# Triton is pinned to both the GPU node selector and licensed hostnames.
 
 terraform apply -var-file=tfvars/dev.tfvars
 
@@ -82,15 +90,19 @@ To switch subscriptions, set the AZ context (`az account set --subscription <id>
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `location` | `eastus` | Azure region. Must have quota for the chosen VM sizes (NCsv3 GPU quota is request-only in many regions). |
+| `location` | `eastus` | Azure region. Must have quota for the chosen VM sizes — A10/A100 GPU families are request-only (default 0) in most regions. |
 | `cluster_name` | `fortiaigate` | Used as the AKS name, DNS prefix, and (after stripping) the storage account name prefix. |
-| `app_node_count` | `2` | Min 1; autoscale max is `count + 2`. |
-| `gpu_enabled` | `false` | Set true to add the GPU node pool + nvidia-device-plugin Helm release + Triton workloads. |
+| `app_node_count` | `1` | Number of **licensed** app nodes; pool is pinned (min=max). Pods are pinned to licensed nodes, so set this to your app-node license count. |
+| `app_node_max_pods` | `110` | Per-node pod cap. Raised above the Azure CNI default of 30 so the whole service set fits on the one licensed app node. |
+| `gpu_enabled` | `false` | Set true to add the GPU node pool + nvidia-device-plugin Helm release + Triton workloads. Needs a supported GPU + quota (see prerequisites). |
+| `gpu_node_vm_size` | `Standard_NV36ads_A10_v5` | A10 (24 GB, SM 86). Must be a Fortinet-supported GPU with ≥24 GB VRAM and SM 75+; the V100 fails. |
+| `acr_id` | `""` | Set to the ACR resource ID to codify the kubelet `AcrPull` grant; leave empty if managed elsewhere. |
+| `db_storage_class` | `managed-csi` | Block (RWO) StorageClass for PostgreSQL/Redis — they cannot run on the shared Azure Files (SMB) class. |
 | `agic_enabled` | `true` | Disable to use ingress-nginx or web_app_routing instead. |
 | `ingress_class` | `azure-application-gateway` | Must match the installed controller. |
 | `internal` | `false` | True puts the AGIC ingress on the Application Gateway's private frontend IP. |
 | `image_repository` | *(required)* | e.g. `myregistry.azurecr.io/fortiaigate`. |
-| `licenses` | `{}` | `{ "aks-app-xxxxxxxx-vmss000000" = "licenses/NODE.lic" }`. Populate after the first apply. |
+| `licenses` | `{}` | `{ "aks-app-xxxxxxxx-vmss000000" = "licenses/APP.lic", "aks-gpu-xxxxxxxx-vmss000000" = "licenses/GPU.lic" }`. Populate after step 1 with the real node names; include the GPU node when `gpu_enabled = true`. |
 
 Full list in `variables.tf`.
 

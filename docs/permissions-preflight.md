@@ -88,8 +88,8 @@ an admin must run this step.
 
 The defaults in `variables.tf` need vCPU quota in the target region:
 
-- `Standard_D16s_v5` × 2 (app pool) — 32 vCPU in the **Standard DSv5 Family**
-- `Standard_NC6s_v3` × 1 (GPU pool, if `gpu_enabled = true`) — 6 vCPU in the **Standard NCSv3 Family**
+- `Standard_D16s_v5` × `app_node_count` (app pool, default 1) — 16 vCPU each in the **Standard DSv5 Family**
+- `Standard_NV36ads_A10_v5` × 1 (GPU pool, if `gpu_enabled = true`) — 36 vCPU in the **Standard NVADSA10v5 Family**. NOTE: A10/A100 GPU families default to **0** quota in most regions and are request-only — see `docs/gpu-triton-compatibility.md`.
 
 ```bash
 # Print all quota lines that are near or at the cap
@@ -100,12 +100,13 @@ az vm list-usage \
 
 # Or just the families this stack cares about
 az vm list-usage --location eastus -o table | \
-  grep -E "(Total Regional|DSv5|NCSv3)"
+  grep -E "(Total Regional|DSv5|NVADSA10v5)"
 ```
 
-GPU quota (`Standard NCSv3 Family vCPUs`) is **0 by default** in most
-subscriptions. If you need GPU support, file a quota request *before* the
-first apply — it usually takes 1-2 business days.
+GPU quota (`Standard NVADSA10v5 Family vCPUs` for the default A10 SKU) is
+**0 by default** in most subscriptions. If you need GPU support, file a quota
+request *before* the first apply — it usually takes 1-2 business days. See
+`docs/gpu-triton-compatibility.md` for the exact family and amount.
 
 ## Step 5 — Dry-run with `terraform plan`
 

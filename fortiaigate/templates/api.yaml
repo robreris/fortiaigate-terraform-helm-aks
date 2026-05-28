@@ -68,14 +68,14 @@ spec:
         - name: FORTIAIGATE_LOG_LEVEL
           value: {{ .Values.fortiaigate.env.logLevel | quote }}
         - name: CSRF_SECRET_KEY
+          {{- if .Values.fortiaigate.env.csrfSecretKey }}
+          value: {{ .Values.fortiaigate.env.csrfSecretKey | quote }}
+          {{- else }}
           valueFrom:
-            {{- if .Values.fortiaigate.env.csrfSecretKey }}
-            value: {{ .Values.fortiaigate.env.csrfSecretKey | quote }}
-            {{- else }}
             secretKeyRef:
               name: {{ include "fortiaigate.fullname" . }}-csrf
               key: csrf-secret-key
-            {{- end }}
+          {{- end }}
         {{- if .Values.tls.enabled }}
         - name: FORTIAIGATE_SSL_CERT_FILE
           value: {{ printf "%s/tls.crt" .Values.tls.mountPath | quote }}

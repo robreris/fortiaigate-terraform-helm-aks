@@ -88,12 +88,14 @@ spec:
             {{- $maxScanChars = $config.env.maxScanChars }}
           {{- end }}
           value: {{ $maxScanChars | quote }}
+        {{- $maxRpcConcurrency := $.Values.scanners.env.maxRpcConcurrency }}
+        {{- if and $config.env (hasKey $config.env "maxRpcConcurrency") }}
+          {{- $maxRpcConcurrency = $config.env.maxRpcConcurrency }}
+        {{- end }}
+        {{- if $maxRpcConcurrency }}
         - name: SCANNER_MAX_RPC_CONCURRENCY
-          {{- $maxRpcConcurrency := $.Values.scanners.env.maxRpcConcurrency }}
-          {{- if and $config.env (hasKey $config.env "maxRpcConcurrency") }}
-            {{- $maxRpcConcurrency = $config.env.maxRpcConcurrency }}
-          {{- end }}
           value: {{ $maxRpcConcurrency | quote }}
+        {{- end }}
         {{- if and (eq $scanner "promptinjection") $.Values.scanners.promptinjection.env }}
         {{- range $key, $value := $.Values.scanners.promptinjection.env }}
         - name: {{ $key | quote }}

@@ -29,14 +29,30 @@ variable "app_node_vm_size" {
 }
 
 variable "app_node_count" {
-  description = "Number of application nodes"
+  # Number of LICENSED application nodes. FortiAIGate node-keyed licensing pins
+  # every pod to licensed nodes (hostname nodeAffinity), so this should equal
+  # the number of app-node licenses you have — extra unlicensed nodes can't run
+  # workload. With a single app license, keep this at 1 and rely on
+  # app_node_max_pods to fit the full service set on the one node.
+  description = "Number of licensed application nodes (must match available app-node licenses)"
   type        = number
-  default     = 2
+  default     = 1
 
   validation {
     condition     = var.app_node_count >= 1
     error_message = "app_node_count must be at least 1."
   }
+}
+
+variable "app_node_max_pods" {
+  # Azure CNI defaults to 30 pods/node. The full FortiAIGate service set plus
+  # system daemonsets exceeds that, and node-keyed licensing forces them all
+  # onto the single licensed app node — so the cap must be raised. Set at node
+  # pool creation (ForceNew). Classic Azure CNI draws one subnet IP per pod, so
+  # max_pods * max nodes must fit in aks_subnet_cidr (/20 = 4096, ample).
+  description = "Max pods per application node (Azure CNI default 30 is too low for the full service set on one licensed node)"
+  type        = number
+  default     = 110
 }
 
 variable "app_node_disk_size_gb" {
@@ -52,9 +68,15 @@ variable "gpu_enabled" {
 }
 
 variable "gpu_node_vm_size" {
-  description = "Azure VM size for the GPU node pool. NCsv3 series provides V100 GPUs suitable for Triton."
+  # The GPU must satisfy BOTH: (1) TensorRT 10 in the Triton image needs SM 75+
+  # (Turing or newer) — rules out the V100/NCsv3; and (2) the FortiAIGate 8.0.0
+  # spec requires a supported model (NVIDIA L4/A10/A100) with >=24 GB VRAM —
+  # which rules out the 16 GB T4. On Azure that intersection is the A10
+  # (NV36ads_A10_v5, 24 GB) or A100. A10 matches the A10G the EKS stack runs.
+  # See docs/gpu-triton-compatibility.md.
+  description = "Azure VM size for the GPU node pool. Must be a Fortinet-supported GPU (A10/A100; L4 unavailable on Azure) with >=24 GB VRAM AND SM 75+. Default Standard_NV36ads_A10_v5 (A10, 24 GB). NOTE: A10/A100 families default to 0 quota — request a quota increase first (see docs/gpu-triton-compatibility.md)."
   type        = string
-  default     = "Standard_NC6s_v3"
+  default     = "Standard_NV36ads_A10_v5"
 }
 
 variable "gpu_node_disk_size_gb" {
@@ -71,6 +93,12 @@ variable "image_repository" {
     condition     = length(var.image_repository) > 0
     error_message = "image_repository is required and must point at a registry containing the FortiAIGate images."
   }
+}
+
+variable "acr_id" {
+  description = "Resource ID of the Azure Container Registry holding the FortiAIGate images. When set, the AKS kubelet identity is granted AcrPull on it so nodes can pull images. Leave empty when the ACR is managed elsewhere (the grant must then exist outside this stack). Find it with: az acr show -n <name> --query id -o tsv"
+  type        = string
+  default     = ""
 }
 
 variable "image_tag" {
@@ -141,6 +169,12 @@ variable "storage_size" {
     condition     = can(regex("^[0-9]+(Mi|Gi|Ti)$", var.storage_size))
     error_message = "storage_size must be a Kubernetes quantity with a binary suffix (e.g. '100Gi', '500Mi', '1Ti')."
   }
+}
+
+variable "db_storage_class" {
+  description = "StorageClass for the bundled PostgreSQL and Redis PVCs. Must be a block (Azure Disk, RWO) class — PostgreSQL cannot initialize its data dir on the shared Azure Files (SMB) class. 'managed-csi' (Standard SSD) ships with AKS; use 'managed-csi-premium' for Premium SSD."
+  type        = string
+  default     = "managed-csi"
 }
 
 variable "storage_account_tier" {

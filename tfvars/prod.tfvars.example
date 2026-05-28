@@ -11,10 +11,16 @@ location = "eastus"
 resource_group_name = "fortiaigate-prod"
 cluster_name        = "fortiaigate-prod"
 image_tag           = "V8.0.0-build0024"
+# Number of LICENSED app nodes — node-keyed licensing pins all pods to licensed
+# nodes, so this must equal your app-node license count. app_node_max_pods
+# (default 110) lets the full service set fit per node.
 app_node_count      = 3
 
 gpu_enabled      = true
-gpu_node_vm_size = "Standard_NC6s_v3"
+# A10 (24 GB, SM 86) — Fortinet-supported with the right VRAM/compute; the older
+# V100 fails TensorRT 10. A10/A100 quota defaults to 0 — request it first.
+# See docs/gpu-triton-compatibility.md.
+gpu_node_vm_size = "Standard_NV36ads_A10_v5"
 
 agic_enabled  = true
 ingress_class = "azure-application-gateway"
@@ -26,5 +32,9 @@ storage_account_tier = "Premium"
 storage_account_kind = "FileStorage"
 
 licenses = {
-  # "aks-app-12345678-vmss000000" = "licenses/NODE1.lic"
+  # Include all licensed app nodes. If gpu_enabled = true, include the aks-gpu-*
+  # node too; Triton is pinned to both the GPU node selector and licensed hostnames.
+  # "aks-app-12345678-vmss000000" = "licenses/APP1.lic"
+  # "aks-app-12345678-vmss000001" = "licenses/APP2.lic"
+  # "aks-gpu-12345678-vmss000000" = "licenses/GPU.lic"
 }

@@ -48,6 +48,36 @@ locals {
     }
   })] : []
 
+  # Move PostgreSQL and Redis off the shared Azure Files (SMB) claim onto their
+  # own dynamically-provisioned Azure Disk PVCs. The chart's values default both
+  # subcharts to existingClaim "fortiaigate-storage" (the RWX SMB share), but
+  # PostgreSQL's initdb fails on SMB — it requires a data dir owned by the db
+  # user at 0700 with POSIX fsync/locking, which CIFS/SMB does not provide, so
+  # the pod crashloops with exit 1 right before initdb runs. Two stateful
+  # services sharing one RWX volume is also wrong. Block storage (RWO) is the
+  # correct backing. Done here rather than in values.yaml so the chart stays
+  # identical to the EKS stack (which sets its own gp3/EBS class the same way).
+  db_storage_values = [yamlencode({
+    postgresql = {
+      primary = {
+        persistence = {
+          existingClaim = ""
+          storageClass  = var.db_storage_class
+          accessModes   = ["ReadWriteOnce"]
+        }
+      }
+    }
+    redis = {
+      master = {
+        persistence = {
+          existingClaim = ""
+          storageClass  = var.db_storage_class
+          accessModes   = ["ReadWriteOnce"]
+        }
+      }
+    }
+  })]
+
   # Ingress annotations — yamlencode handles keys with dots and slashes correctly,
   # which the set{} name path syntax cannot express.
   ingress_annotation_values = length(var.ingress_annotations) > 0 ? [yamlencode({
@@ -138,6 +168,16 @@ resource "helm_release" "fortiaigate" {
   namespace = kubernetes_namespace.fortiaigate.metadata[0].name
   timeout   = 1200
 
+  lifecycle {
+    precondition {
+      condition = !var.gpu_enabled || length([
+        for node_name in keys(var.licenses) : node_name
+        if can(regex("^aks-gpu-", node_name))
+      ]) > 0
+      error_message = "gpu_enabled=true requires var.licenses to include the GPU AKS node name, usually aks-gpu-... Run the targeted infrastructure apply first, then run `kubectl get nodes -o custom-columns=NAME:.metadata.name,ROLE:.metadata.labels.fortiaigate-role --no-headers` and add both app and gpu node licenses before the full apply."
+    }
+  }
+
   depends_on = [
     kubernetes_storage_class.azurefile,
     kubernetes_config_map.licenses,
@@ -150,6 +190,7 @@ resource "helm_release" "fortiaigate" {
   values = concat(
     [for f in var.extra_values_files : file(f)],
     local.gpu_values,
+    local.db_storage_values,
     local.internal_appgw_values,
     local.ingress_annotation_values,
     local.tls_values,
