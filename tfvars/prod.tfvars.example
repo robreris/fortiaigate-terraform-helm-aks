@@ -27,6 +27,17 @@ ingress_class = "azure-application-gateway"
 internal      = false
 ingress_host  = "fortiaigate.example.com"
 
+# Public UI path: create an Azure DNS (or external DNS) A record for
+# ingress_host that points to the Application Gateway public IP. Use a trusted
+# certificate for production; tls.tf only generates a bootstrap self-signed
+# certificate. See docs/application-gateway-dns-tls.md.
+ingress_annotations = {
+  "appgw.ingress.kubernetes.io/backend-protocol"          = "https"
+  "appgw.ingress.kubernetes.io/ssl-redirect"              = "true"
+  "appgw.ingress.kubernetes.io/health-probe-path"         = "/"
+  "appgw.ingress.kubernetes.io/health-probe-status-codes" = "200-399"
+}
+
 storage_size         = "500Gi"
 storage_account_tier = "Premium"
 storage_account_kind = "FileStorage"

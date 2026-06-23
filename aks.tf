@@ -66,6 +66,19 @@ resource "azurerm_kubernetes_cluster" "this" {
   }
 }
 
+# AGIC creates/manages the Application Gateway with its own addon-managed
+# identity. The gateway lives in the AKS managed resource group, but it joins
+# the appgw subnet in this stack's VNet, so that identity needs subnet join
+# permissions or gateway creation fails with ApplicationGatewayInsufficientPermissionOnSubnet.
+resource "azurerm_role_assignment" "agic_appgw_subnet_network_contributor" {
+  count = var.agic_enabled ? 1 : 0
+
+  scope                            = azurerm_subnet.appgw.id
+  role_definition_name             = "Network Contributor"
+  principal_id                     = azurerm_kubernetes_cluster.this.ingress_application_gateway[0].ingress_application_gateway_identity[0].object_id
+  skip_service_principal_aad_check = true
+}
+
 # GPU node pool — separate resource so it can be added/removed without
 # replacing the cluster. Tainted to keep CPU workloads off the (expensive)
 # GPU nodes; the chart's gpu_values block (helm.tf) supplies matching

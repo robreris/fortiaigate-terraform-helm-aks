@@ -15,7 +15,7 @@ Terraform stack that deploys FortiAIGate on Azure AKS.
   - OIDC issuer and workload identity enabled (AKS analogue of EKS IRSA).
   - AGIC addon (optional) — AKS provisions and manages an Application Gateway in a dedicated subnet.
 - A Premium Azure Files storage account, the kubelet identity role assignments needed for dynamic file-share provisioning, and an `azurefile-fortiaigate` StorageClass.
-- The `fortiaigate` Helm release, with a self-signed TLS cert generated at apply time and (optionally) per-node licenses sourced from a ConfigMap.
+- The `fortiaigate` Helm release, with a self-signed TLS cert generated at apply time and (optionally) per-node licenses sourced from a ConfigMap. For public DNS and production TLS, see [docs/application-gateway-dns-tls.md](docs/application-gateway-dns-tls.md).
 
 ## Prerequisites
 
@@ -58,7 +58,14 @@ terraform apply \
 #
 # If gpu_enabled = true, var.licenses must include the aks-gpu-* node too;
 # Triton is pinned to both the GPU node selector and licensed hostnames.
+```
 
+Before the full apply, make sure the AKS kubelet identity has `AcrPull`
+on the registry. If you set `acr_id`, Terraform manages that grant. If
+you leave `acr_id` empty, grant it manually:
+[Later: grant `AcrPull` once the cluster exists](docs/registry-and-images.md#later-grant-acrpull-once-the-cluster-exists).
+
+```bash
 terraform apply -var-file=tfvars/dev.tfvars
 
 # 4. Talk to the cluster
@@ -66,6 +73,10 @@ $(terraform output -raw configure_kubectl)
 kubectl get pods,pvc,ingress -n fortiaigate
 terraform output ingress_address
 ```
+
+For the Azure equivalent of the AWS `ALB + Route 53 + ACM` flow, use
+Application Gateway + Azure DNS (or your DNS provider) + a trusted TLS
+certificate. See [Application Gateway, DNS, and TLS](docs/application-gateway-dns-tls.md).
 
 ### Why two steps?
 
@@ -100,11 +111,20 @@ To switch subscriptions, set the AZ context (`az account set --subscription <id>
 | `db_storage_class` | `managed-csi` | Block (RWO) StorageClass for PostgreSQL/Redis — they cannot run on the shared Azure Files (SMB) class. |
 | `agic_enabled` | `true` | Disable to use ingress-nginx or web_app_routing instead. |
 | `ingress_class` | `azure-application-gateway` | Must match the installed controller. |
-| `internal` | `false` | True puts the AGIC ingress on the Application Gateway's private frontend IP. |
+| `internal` | `false` | For public access, leave false and point DNS at the Application Gateway public IP. True adds AGIC's private-IP annotation; the gateway must also have a private frontend. |
+| `ingress_host` | `""` | Hostname for the ingress rule, e.g. `fortiaigate.example.com`. Set this before creating DNS/TLS for a public UI. |
 | `image_repository` | *(required)* | e.g. `myregistry.azurecr.io/fortiaigate`. |
 | `licenses` | `{}` | `{ "aks-app-xxxxxxxx-vmss000000" = "licenses/APP.lic", "aks-gpu-xxxxxxxx-vmss000000" = "licenses/GPU.lic" }`. Populate after step 1 with the real node names; include the GPU node when `gpu_enabled = true`. |
 
 Full list in `variables.tf`.
+
+## Documentation
+
+- [Application Gateway, DNS, and TLS](docs/application-gateway-dns-tls.md) — Azure equivalent of ALB + Route 53 + ACM.
+- [Container registry and image upload](docs/registry-and-images.md) — ACR, image push, and `AcrPull`.
+- [GPU and Triton compatibility](docs/gpu-triton-compatibility.md) — supported Azure GPU SKUs and quota.
+- [Permissions pre-flight](docs/permissions-preflight.md) — Azure RBAC and provider checks before apply.
+- [Remote state](docs/remote-state.md) — Azure Storage backend bootstrap.
 
 ## Teardown
 

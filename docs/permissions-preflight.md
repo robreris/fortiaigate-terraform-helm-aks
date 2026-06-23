@@ -12,11 +12,11 @@ this stack creates.
 | Resource Group | `Microsoft.Resources` | `Contributor` on subscription **or** `Owner` |
 | VNet + subnets | `Microsoft.Network` | `Network Contributor` (covered by `Contributor`) |
 | AKS cluster | `Microsoft.ContainerService` | `Contributor` |
-| AKS-managed Application Gateway (AGIC addon) | `Microsoft.Network` | `Contributor` on the AppGw subnet's RG. AKS creates a managed identity and assigns it `Contributor` on the gateway — that role assignment requires `User Access Administrator` (or `Role Based Access Control Administrator`) on the parent scope. |
+| AKS-managed Application Gateway (AGIC addon) | `Microsoft.Network` + `Microsoft.Authorization` | `Contributor` for Application Gateway resources, plus role-assignment write so Terraform can grant the AGIC addon identity `Network Contributor` on the AppGw subnet. Without that subnet grant, AGIC fails with `ApplicationGatewayInsufficientPermissionOnSubnet`. |
 | Storage Account + role assignments | `Microsoft.Storage` + `Microsoft.Authorization` | `Contributor` for the SA itself, plus `User Access Administrator` / `Role Based Access Control Administrator` to grant the kubelet identity `Storage Account Contributor` and `Storage File Data SMB Share Contributor`. |
 | Workload Identity / OIDC | `Microsoft.ContainerService` | Covered by `Contributor`. No AAD app creation is performed by this stack (yet), so no AAD permissions are required for the initial deploy. |
 
-**Bottom line:** the SP needs **`Contributor` + `User Access Administrator`** on the target subscription (or RG), or just **`Owner`**. `Contributor` alone is **not** enough — it cannot create the role assignments in `storage.tf`.
+**Bottom line:** the SP needs **`Contributor` + `User Access Administrator`** on the target subscription (or RG), or just **`Owner`**. `Contributor` alone is **not** enough — it cannot create the role assignments in `storage.tf` and `aks.tf`.
 
 ## Step 1 — Log in as the SP
 

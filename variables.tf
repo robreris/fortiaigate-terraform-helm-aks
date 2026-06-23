@@ -223,7 +223,7 @@ variable "extra_values_files" {
 }
 
 variable "internal" {
-  description = "Deploy as an internal (private) service. Sets the Application Gateway to internal scheme so it is only reachable within the VNet and connected networks."
+  description = "Deploy as an internal (private) service. Adds AGIC's private-IP annotation; the Application Gateway must also have a private frontend IP. For public DNS, keep false."
   type        = bool
   default     = false
 }

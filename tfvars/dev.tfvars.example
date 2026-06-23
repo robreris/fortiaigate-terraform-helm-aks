@@ -54,6 +54,9 @@ gpu_node_vm_size   = "Standard_NV36ads_A10_v5"
 # ---------------------------------------------------------------------------
 # Ingress (Application Gateway Ingress Controller)
 # ---------------------------------------------------------------------------
+# Public UI path: keep internal=false, set ingress_host, then create an Azure
+# DNS (or external DNS) A record to the Application Gateway public IP. See
+# docs/application-gateway-dns-tls.md.
 
 agic_enabled  = true
 ingress_class = "azure-application-gateway"
@@ -68,12 +71,13 @@ ingress_host  = "fortiaigate.example.com"
 #   - health-probe-*:   AGIC defaults to GET / which fails for /api/ and /v1/;
 #                       these per-path probes match what the EKS chart sets
 #                       via ALB Service annotations.
-#   - appgw-ssl-certificate: name of a cert imported into Application Gateway
-#                            from Key Vault. Omit for self-signed cert from tls.tf.
+#   - appgw-ssl-certificate: name of a cert installed on Application Gateway.
+#                            AGIC ignores this if the Ingress also has spec.tls;
+#                            see docs/application-gateway-dns-tls.md.
 ingress_annotations = {
-  "appgw.ingress.kubernetes.io/backend-protocol"     = "https"
-  "appgw.ingress.kubernetes.io/ssl-redirect"         = "true"
-  "appgw.ingress.kubernetes.io/health-probe-path"    = "/"
+  "appgw.ingress.kubernetes.io/backend-protocol"          = "https"
+  "appgw.ingress.kubernetes.io/ssl-redirect"              = "true"
+  "appgw.ingress.kubernetes.io/health-probe-path"         = "/"
   "appgw.ingress.kubernetes.io/health-probe-status-codes" = "200-399"
   # "appgw.ingress.kubernetes.io/appgw-ssl-certificate" = "<kv-cert-name>"
 }
