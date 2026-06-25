@@ -3,6 +3,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: core
+  {{- if .Values.tls.reloaderEnabled }}
+  annotations:
+    # Stakater Reloader: roll this Deployment when the TLS secret changes so it
+    # stops serving an old cert without a manual `kubectl rollout restart`.
+    secret.reloader.stakater.com/reload: {{ include "fortiaigate.tlsSecretName" . | quote }}
+  {{- end }}
   labels:
     app: core
     app.kubernetes.io/name: fortiaigate

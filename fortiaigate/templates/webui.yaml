@@ -3,6 +3,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: webui
+  {{- if .Values.tls.reloaderEnabled }}
+  annotations:
+    # Stakater Reloader: roll this Deployment when the TLS secret changes so it
+    # stops serving an old cert without a manual `kubectl rollout restart`.
+    secret.reloader.stakater.com/reload: {{ include "fortiaigate.tlsSecretName" . | quote }}
+  {{- end }}
   labels:
     app: webui
     app.kubernetes.io/name: fortiaigate
@@ -53,6 +59,23 @@ spec:
         command: ["node", "https-server.js"]
         ports:
         - containerPort: 3000
+          name: http
+          protocol: TCP
+        # Readiness probe doubles as the source AGIC/ALB derive the per-backend
+        # health probe from (see api.yaml for why per-backend paths are needed).
+        # The Next.js UI is served under basePath /ui, so / 404s and only /ui
+        # returns 200 -- that's both the health path and the browser entry point.
+        readinessProbe:
+          httpGet:
+            path: /ui
+            port: http
+            {{- if .Values.tls.enabled }}
+            scheme: HTTPS
+            {{- end }}
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
         resources:
           {{- toYaml .Values.webui.resources | nindent 10 }}
         env:

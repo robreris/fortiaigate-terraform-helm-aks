@@ -325,6 +325,16 @@ tls:
   # TLS mount path in containers
   mountPath: "/etc/tls"
 
+  # When true, annotate the core/api/webui Deployments for Stakater Reloader so
+  # they roll automatically whenever the TLS secret changes (cert-manager
+  # renewal or a staging->production flip). Without it, pods read the cert once
+  # at startup and keep serving the old one until manually restarted. Off by
+  # default; the AKS Terraform root turns it on (and installs the Reloader
+  # controller) only in Let's Encrypt mode, where the secret content changes
+  # out-of-band from any helm apply. Self-signed mode doesn't need it (the cert
+  # exists at apply time, so the checksum-based roll already works).
+  reloaderEnabled: false
+
   # Certificate data (used to create secrets)
   # You need to provide your own certificate and key
   cert: files/certificate/dflt.crt

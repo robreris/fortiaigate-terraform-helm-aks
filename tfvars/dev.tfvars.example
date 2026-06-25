@@ -83,6 +83,23 @@ ingress_annotations = {
 }
 
 # ---------------------------------------------------------------------------
+# Let's Encrypt TLS (optional, default off)
+# ---------------------------------------------------------------------------
+# Automates a browser-trusted cert via cert-manager + ACME DNS-01 against an
+# existing public Azure DNS zone, authenticated with workload identity (no
+# secret). cert-manager then owns fortiaigate-tls-secret, which both serves the
+# trusted frontend cert AND makes AGIC trust the HTTPS backend (so no manual
+# trusted-root upload). Requires ingress_host (above) set to a name in the zone.
+# Full walkthrough: docs/tls-letsencrypt.md.
+#
+# letsencrypt_enabled     = true
+# letsencrypt_environment = "staging"   # validate first, then flip to "production"
+# acme_email              = "you@example.com"
+# dns_zone_name           = "example.com"
+# dns_zone_resource_group = "dns-rg"     # RG holding the DNS zone (may differ from cluster RG)
+# cert_manager_version    = "v1.16.2"
+
+# ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------
 

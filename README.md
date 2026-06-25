@@ -138,6 +138,8 @@ helm -n kube-system uninstall nvidia-device-plugin     # if gpu_enabled
 terraform destroy -var-file=tfvars/dev.tfvars
 ```
 
+Only releases with finalizer risk are uninstalled by hand above. The other Terraform-managed Helm releases — cert-manager and the Stakater Reloader (both only present when `letsencrypt_enabled`) — have no PVCs, load balancers, or finalizers, so `terraform destroy` removes them cleanly with no manual `helm uninstall` step.
+
 The Azure Files storage account is part of the resource group and goes away with `destroy`. The PVs have `Retain` set, so the underlying shares survive until the storage account itself is dropped; back them up first if you need their contents.
 
 ## License

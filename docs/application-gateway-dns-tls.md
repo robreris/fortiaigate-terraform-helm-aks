@@ -73,8 +73,34 @@ az network dns record-set a add-record \
 ```
 
 Azure DNS does not have a direct Route 53-style ALB alias record. The normal
-pattern is an `A` record to the Application Gateway public IP. If you configure
-a DNS label on the public IP, a `CNAME` to that label is also possible.
+pattern is an `A` record (or an Azure DNS **alias** A record targeting the public
+IP *resource*) to the Application Gateway public IP. If you configure a DNS label
+on the public IP, a `CNAME` to that label is also possible.
+
+> **Pick the right public IP.** The AKS managed resource group contains **two**
+> public IPs and they look interchangeable in the alias-record dropdown:
+> - `<cluster>-appgw-appgwpip` — the Application Gateway **frontend**. This is the
+>   one to target.
+> - a **GUID-named** IP — the cluster's **outbound load-balancer** (node egress).
+>   Pointing DNS here routes nowhere useful.
+>
+> Confirm by matching the IP from `terraform output ingress_address`.
+
+> **The IP changes on a teardown/rebuild.** The Application Gateway and its public
+> IP live in the AKS-managed `MC_...` resource group, so a full `terraform
+> destroy` + rebuild mints a **new** IP. The DNS zone and domain registration
+> survive (they're in your own RG), so recovery is just re-pointing the record —
+> not re-registering. After a rebuild, get the new IP and update the record:
+>
+> ```bash
+> terraform output ingress_address   # new Application Gateway IP
+> az network dns record-set a update \
+>   --resource-group "$DNS_RG" --zone-name "$DNS_ZONE" --name "fortiaigate" ...
+> ```
+>
+> An Azure DNS **alias** A record pointed at the public IP *resource* (rather than
+> a hardcoded address) auto-follows the IP, but only while that resource exists —
+> a rebuild replaces it, so you re-point either way.
 
 ## TLS options
 
@@ -87,8 +113,13 @@ For production, use one of these patterns:
 1. Replace the Terraform-generated TLS material with a real certificate for
    `ingress_host` and keep using the Kubernetes TLS secret referenced by the
    Ingress `spec.tls`.
-2. Manage the Kubernetes TLS secret with cert-manager. This requires adjusting
-   this stack so Terraform does not also own the same `fortiaigate-tls-secret`.
+2. Manage the Kubernetes TLS secret with cert-manager and Let's Encrypt. This is
+   automated by the stack behind `letsencrypt_enabled = true`: cert-manager
+   issues a browser-trusted cert into `fortiaigate-tls-secret` via ACME DNS-01
+   against an Azure DNS zone (workload-identity auth), and `tls.tf` steps aside
+   so Terraform no longer owns the secret. This also makes AGIC trust the HTTPS
+   backend automatically (well-known CA chain), so no trusted-root upload is
+   needed. Full walkthrough: [docs/tls-letsencrypt.md](tls-letsencrypt.md).
 3. Install a certificate on Application Gateway and reference it with:
 
    ```hcl

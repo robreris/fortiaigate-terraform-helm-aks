@@ -12,6 +12,11 @@ metadata:
     version: v1
   annotations:
     deployment.kubernetes.io/revision: "1"
+    {{- if .Values.tls.reloaderEnabled }}
+    # Stakater Reloader: roll this Deployment when the TLS secret changes so it
+    # stops serving an old cert without a manual `kubectl rollout restart`.
+    secret.reloader.stakater.com/reload: {{ include "fortiaigate.tlsSecretName" . | quote }}
+    {{- end }}
 spec:
   replicas: {{ .Values.api.replicas }}
   strategy:
@@ -61,6 +66,22 @@ spec:
         - containerPort: 8000
           name: http
           protocol: TCP
+        # Readiness probe doubles as the source AGIC/ALB derive the per-backend
+        # health probe from. AGIC has no per-Service healthcheck-path annotation
+        # (unlike the ALB), so a single ingress-wide health-probe-path can't fit
+        # all three backends; the readiness path is how each backend gets the
+        # right probe. api serves its OpenAPI schema at /openapi.json (200).
+        readinessProbe:
+          httpGet:
+            path: /openapi.json
+            port: http
+            {{- if .Values.tls.enabled }}
+            scheme: HTTPS
+            {{- end }}
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
         resources:
           {{- toYaml .Values.api.resources | nindent 10 }}
         # Environment variables

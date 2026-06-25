@@ -205,6 +205,19 @@ variable "licenses" {
   default     = {}
 }
 
+variable "helm_timeout" {
+  # The helm provider wraps the release install/upgrade in a context with this
+  # deadline (seconds). On a FIRST apply the nodes pull ~15 app images + Triton
+  # fresh from ACR, which can exceed the old 1200s and surface as "context
+  # deadline exceeded" — a re-apply then succeeds because the images are cached.
+  # Raised default gives first-pull headroom; bump higher for slow/distant ACRs.
+  # NOTE: this does not help when the hang is the licensing 503 on `core` (a
+  # stuck "In Use" seat) — that's a hard block a longer timeout won't clear.
+  description = "Seconds the helm provider waits for the fortiaigate release to become ready before erroring with 'context deadline exceeded'"
+  type        = number
+  default     = 2400
+}
+
 variable "update_strategy" {
   description = "Deployment update strategy. 'Recreate' avoids GPU deadlock on single-GPU nodes; 'RollingUpdate' for zero-downtime when spare capacity exists."
   type        = string
@@ -226,4 +239,49 @@ variable "internal" {
   description = "Deploy as an internal (private) service. Adds AGIC's private-IP annotation; the Application Gateway must also have a private frontend IP. For public DNS, keep false."
   type        = bool
   default     = false
+}
+
+# ----------------------------------------------------------------------------
+# Let's Encrypt / cert-manager (optional, default off)
+# ----------------------------------------------------------------------------
+
+variable "letsencrypt_enabled" {
+  description = "Install cert-manager and issue a browser-trusted Let's Encrypt certificate into fortiaigate-tls-secret via ACME DNS-01 against Azure DNS (workload-identity auth). When true, cert-manager owns the TLS secret instead of the self-signed cert in tls.tf, which also makes AGIC trust the HTTPS backend (the well-known CA chain) and serve a trusted frontend cert. Requires an existing public Azure DNS zone and ingress_host set."
+  type        = bool
+  default     = false
+}
+
+variable "letsencrypt_environment" {
+  description = "Which ACME endpoint to use. 'staging' (default) has generous rate limits for validating the pipeline but its root is untrusted (browser still warns); flip to 'production' for a trusted cert. Changing this rolls the app pods to pick up the re-issued cert."
+  type        = string
+  default     = "staging"
+
+  validation {
+    condition     = contains(["staging", "production"], var.letsencrypt_environment)
+    error_message = "letsencrypt_environment must be either 'staging' or 'production'."
+  }
+}
+
+variable "acme_email" {
+  description = "Email used to register the ACME (Let's Encrypt) account. Required when letsencrypt_enabled = true."
+  type        = string
+  default     = ""
+}
+
+variable "dns_zone_name" {
+  description = "Name of the existing public Azure DNS zone cert-manager writes the _acme-challenge TXT records into (e.g. 'example.com'). Required when letsencrypt_enabled = true."
+  type        = string
+  default     = ""
+}
+
+variable "dns_zone_resource_group" {
+  description = "Resource group containing the Azure DNS zone (var.dns_zone_name). May differ from the cluster RG (e.g. an App Service Domains zone). The Terraform principal needs role-assignment write on this scope to grant cert-manager DNS Zone Contributor. Required when letsencrypt_enabled = true."
+  type        = string
+  default     = ""
+}
+
+variable "cert_manager_version" {
+  description = "cert-manager Helm chart version to install (e.g. 'v1.16.2'). Use a release that supports Azure workload identity for the DNS-01 solver (v1.11+)."
+  type        = string
+  default     = "v1.16.2"
 }

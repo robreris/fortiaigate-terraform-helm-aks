@@ -1,0 +1,18 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fortiaigate-tls
+  namespace: {{ .Values.namespace }}
+  annotations:
+    # Drop a throwaway self-signed cert into the secret immediately so the
+    # fortiaigate pods (which mount it at startup) can boot while the ACME
+    # DNS-01 challenge completes (~1-3 min). cert-manager swaps in the real
+    # cert when issuance succeeds.
+    cert-manager.io/issue-temporary-certificate: "true"
+spec:
+  secretName: {{ .Values.secretName }}
+  issuerRef:
+    name: {{ .Values.issuerName }}
+    kind: ClusterIssuer
+  dnsNames:
+    - {{ required "host is required" .Values.host }}
