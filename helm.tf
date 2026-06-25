@@ -95,11 +95,16 @@ locals {
     }
   })] : []
 
-  # Terraform owns the TLS Secret, so pass both the name and a stable checksum
-  # into Helm. Pod template annotations use the checksum to trigger rollouts
-  # when Terraform regenerates the certificate.
-  tls_secret_name     = kubernetes_secret.tls.metadata[0].name
-  tls_secret_checksum = sha256(tls_self_signed_cert.fortiaigate.cert_pem)
+  # The chart mounts fortiaigate-tls-secret by name (tls.existingSecret). Who
+  # owns it depends on the mode:
+  #   - self-signed (default): Terraform's kubernetes_secret.tls owns it, and the
+  #     checksum is the cert content so regenerating it triggers a pod rollout.
+  #   - Let's Encrypt: cert-manager owns it (certmanager.tf). Terraform doesn't
+  #     know the cert content, so the checksum keys off the ACME environment
+  #     instead -- flipping staging->production rolls the pods to pick up the new
+  #     cert. The name is the well-known secret cert-manager writes to.
+  tls_secret_name     = var.letsencrypt_enabled ? "fortiaigate-tls-secret" : kubernetes_secret.tls[0].metadata[0].name
+  tls_secret_checksum = var.letsencrypt_enabled ? "letsencrypt-${var.letsencrypt_environment}" : sha256(tls_self_signed_cert.fortiaigate[0].cert_pem)
   tls_values = [yamlencode({
     tls = {
       existingSecret         = local.tls_secret_name
@@ -166,7 +171,7 @@ resource "helm_release" "fortiaigate" {
   name      = "fortiaigate"
   chart     = "${path.module}/fortiaigate"
   namespace = kubernetes_namespace.fortiaigate.metadata[0].name
-  timeout   = 1200
+  timeout   = var.helm_timeout
 
   lifecycle {
     precondition {
@@ -182,6 +187,9 @@ resource "helm_release" "fortiaigate" {
     kubernetes_storage_class.azurefile,
     kubernetes_config_map.licenses,
     kubernetes_secret.tls,
+    # In Let's Encrypt mode this owns fortiaigate-tls-secret instead; both are
+    # counted resources, so whichever is inactive is simply an empty dependency.
+    helm_release.cert_manager_issuer,
     helm_release.nvidia_device_plugin,
   ]
 

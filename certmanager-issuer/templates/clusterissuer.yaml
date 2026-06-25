@@ -1,0 +1,23 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.issuerName }}
+spec:
+  acme:
+    server: {{ .Values.acmeServer }}
+    email: {{ required "acme email is required" .Values.email }}
+    privateKeySecretRef:
+      # cert-manager stores the ACME account key here, in the cert-manager namespace.
+      name: {{ .Values.issuerName }}-account-key
+    solvers:
+      - dns01:
+          azureDNS:
+            hostedZoneName: {{ required "dnsZone.name is required" .Values.dnsZone.name }}
+            resourceGroupName: {{ required "dnsZone.resourceGroup is required" .Values.dnsZone.resourceGroup }}
+            subscriptionID: {{ required "dnsZone.subscriptionID is required" .Values.dnsZone.subscriptionID }}
+            environment: AzurePublicCloud
+            # Workload identity: the controller pod's projected token is exchanged
+            # for this identity. ClusterIssuers use ambient credentials by default,
+            # so only the client ID is needed here.
+            managedIdentity:
+              clientID: {{ required "managedIdentityClientID is required" .Values.managedIdentityClientID }}

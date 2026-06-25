@@ -1,0 +1,11 @@
+apiVersion: v2
+name: certmanager-issuer
+description: >-
+  Let's Encrypt ClusterIssuer (ACME DNS-01 via Azure DNS + workload identity)
+  and the Certificate that issues into fortiaigate-tls-secret. Deployed by the
+  AKS Terraform root when var.letsencrypt_enabled = true. Kept as a chart (not a
+  Terraform kubernetes_manifest) so it doesn't require the cert-manager CRDs to
+  exist at plan time.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

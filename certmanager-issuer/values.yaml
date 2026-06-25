@@ -1,0 +1,31 @@
+# All values are supplied by the Terraform helm_release.cert_manager_issuer
+# (certmanager.tf). The defaults here only document the shape.
+
+# Name of the ClusterIssuer (e.g. letsencrypt-staging / letsencrypt-production).
+issuerName: letsencrypt-staging
+
+# ACME directory URL. Staging for validating the pipeline, production for a
+# browser-trusted cert.
+acmeServer: https://acme-staging-v02.api.letsencrypt.org/directory
+
+# ACME account registration email.
+email: ""
+
+# Namespace the Certificate (and its secret) live in -- the fortiaigate namespace.
+namespace: fortiaigate
+
+# Secret cert-manager writes the issued cert/key into. Must match the secret the
+# fortiaigate chart mounts (tls.existingSecret) and the ingress spec.tls secret.
+secretName: fortiaigate-tls-secret
+
+# Public DNS name the cert is issued for. Must match the ingress host.
+host: ""
+
+# Azure DNS zone the DNS-01 challenge writes TXT records into.
+dnsZone:
+  name: ""
+  resourceGroup: ""
+  subscriptionID: ""
+
+# Client ID of the user-assigned identity cert-manager federates into.
+managedIdentityClientID: ""
