@@ -27,7 +27,7 @@ location = "eastus"
 # Mixing any of these means `terraform destroy` takes out state or images.
 resource_group_name = "fortiaigate-dev"
 cluster_name        = "fortiaigate-dev"
-# build0031 image set from ../FortiAIGate-on-EKS/v801-builds/build0031.
+# build0031 image set from the supplied FortiAIGate release archives.
 # All three must match the images actually pushed to your registry.
 image_tag               = "V8.0.1-build0031"
 triton_image_tag        = "25.11-onnx-trt-agt-s1"

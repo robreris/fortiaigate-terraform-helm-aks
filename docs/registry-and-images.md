@@ -51,7 +51,7 @@ dedicated `$ACR_RG` separate from the cluster RG.
 
 ## Sizing the SKU
 
-The eight build0031 Docker archives in the sibling checkout total 21.29 GB
+The eight supplied build0031 Docker archives total 21.29 GB
 (19.83 GiB) on disk. This is the size of the supplied tar files, not a measured
 ACR storage bill: it stores layers differently from Docker tar archives.
 Monitor usage after import and review [Azure's current SKU limits](https://learn.microsoft.com/en-us/azure/container-registry/container-registry-skus)
@@ -131,10 +131,7 @@ az role assignment create \
 ## Step 3 — Load and push the image archives
 
 The eight image archives and
-`FAIG_helm_chart-V8.0.1-build0031-FORTINET.tar.gz` are in
-`../FortiAIGate-on-EKS/v801-builds/build0031/images/`. The chart archive was
-extracted and rendered for this review. The source repository/tag pairs below
-were also verified directly from each Docker archive's `manifest.json`.
+`FAIG_helm_chart-V8.0.1-build0031-FORTINET.tar.gz` should be downloaded to a preferred location.
 
 The deployment chart requires these repositories under `IMAGE_PREFIX`:
 
@@ -159,7 +156,7 @@ not establish runtime compatibility until a live AKS deployment is tested.
 The pattern for each image is `docker load → docker tag → docker push`:
 
 ```bash
-export IMAGES_DIR="../FortiAIGate-on-EKS/v801-builds/${BUILD}/images"
+export IMAGES_DIR="<location where images downloaded"
 export ACR_PREFIX="${ACR_NAME}.azurecr.io/${IMAGE_PREFIX}"
 
 # Stop before any push if the verified archives are missing.

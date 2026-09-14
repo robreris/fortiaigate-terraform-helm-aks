@@ -13,7 +13,7 @@ A single Terraform stack that stands up FortiAIGate on Azure AKS:
 
 There is no application source code here — this repo is purely IaC. FortiAIGate container images come from an external registry referenced via `var.image_repository` (typically Azure Container Registry, e.g. `<name>.azurecr.io/fortiaigate`).
 
-This repo is the Azure twin of `fortiaigate-terraform-helm-eks` (sibling working directory at `/home/robert/GitRepos/robreris/fortiaigate-terraform-helm-eks`). Its Helm chart carries AKS-specific ingress, TLS, license, storage, and GPU placement changes. Build0031 model configurations and application settings come from `../FortiAIGate-on-EKS/v801-builds/build0031/images/FAIG_helm_chart-V8.0.1-build0031-FORTINET.tar.gz`. Keep platform patches when importing later builds; do not replace the chart wholesale.
+This repo is the Azure counterpart to `fortiaigate-terraform-helm-eks`. Its Helm chart carries AKS-specific ingress, TLS, license, storage, and GPU placement changes. Build0031 model configurations and application settings were aligned with the supplied `FAIG_helm_chart-V8.0.1-build0031-FORTINET.tar.gz` archive. Keep platform patches when importing later builds; do not replace the chart wholesale.
 
 ## Current state
 

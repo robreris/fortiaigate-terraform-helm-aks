@@ -129,7 +129,7 @@ The Terraform defaults and tfvars examples select the build0031 image set.
 Set all three image tag variables explicitly when moving to a later build.
 This repository does not bundle images; the
 [registry guide](docs/registry-and-images.md) records the names and tags
-verified from the sibling build0031 archives.
+verified from the supplied build0031 archives.
 
 Upgrading an existing release from the earlier chart changes the Ingress paths
 to build0031's `/ui` → webui, `/api/` → api, and `/` → core, and replaces the
