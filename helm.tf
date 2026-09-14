@@ -11,6 +11,14 @@ resource "kubernetes_namespace" "fortiaigate" {
 }
 
 locals {
+  # The Helm provider sees a constant local chart path. Include a digest in
+  # values so edits to the local chart trigger an in-place release upgrade.
+  chart_revision = sha256(join("", concat(
+    [filesha256("${path.module}/fortiaigate/Chart.yaml"), filesha256("${path.module}/fortiaigate/values.yaml")],
+    [for f in sort(fileset("${path.module}/fortiaigate", "templates/**")) : filesha256("${path.module}/fortiaigate/${f}")],
+    [for f in sort(fileset("${path.module}/fortiaigate", "charts/**")) : filesha256("${path.module}/fortiaigate/${f}")],
+  )))
+
   license_cm_name = length(kubernetes_config_map.licenses) > 0 ? "fortiaigate-license-config" : ""
 
   # Pass node names into global.licenses so the Helm affinity blocks can use them.
@@ -55,8 +63,8 @@ locals {
   # user at 0700 with POSIX fsync/locking, which CIFS/SMB does not provide, so
   # the pod crashloops with exit 1 right before initdb runs. Two stateful
   # services sharing one RWX volume is also wrong. Block storage (RWO) is the
-  # correct backing. Done here rather than in values.yaml so the chart stays
-  # identical to the EKS stack (which sets its own gp3/EBS class the same way).
+  # correct backing. Keep this platform-specific override in Terraform rather
+  # than changing the upstream chart's default shared-PVC values.
   db_storage_values = [yamlencode({
     postgresql = {
       primary = {
@@ -80,9 +88,17 @@ locals {
 
   # Ingress annotations — yamlencode handles keys with dots and slashes correctly,
   # which the set{} name path syntax cannot express.
-  ingress_annotation_values = length(var.ingress_annotations) > 0 ? [yamlencode({
-    ingress = { annotations = var.ingress_annotations }
-  })] : []
+  ingress_annotation_values = [yamlencode({
+    ingress = {
+      annotations = merge(
+        var.ingress_class == "azure-application-gateway" ? {
+          "appgw.ingress.kubernetes.io/backend-protocol" = "https"
+          "appgw.ingress.kubernetes.io/ssl-redirect"     = "true"
+        } : {},
+        var.ingress_annotations,
+      )
+    }
+  })]
 
   # Internal Application Gateway: AGIC reads this annotation to tell the
   # gateway to use a private frontend IP only. Placed before
@@ -107,6 +123,7 @@ locals {
   tls_secret_checksum = var.letsencrypt_enabled ? "letsencrypt-${var.letsencrypt_environment}" : sha256(tls_self_signed_cert.fortiaigate[0].cert_pem)
   tls_values = [yamlencode({
     tls = {
+      enabled                = true
       existingSecret         = local.tls_secret_name
       existingSecretChecksum = local.tls_secret_checksum
       # In Let's Encrypt mode cert-manager rewrites the secret out-of-band from
@@ -146,14 +163,14 @@ locals {
   # POSTGRES_SSL_CA_CERTS -- and redis's own probe (certCAFilename: tls.crt) --
   # at the serving cert AS its own CA, which is only valid for a self-signed
   # cert. An ACME leaf can't validate itself, so redis crashloops on
-  # "tlsv1 alert unknown ca" and app->DB TLS breaks. The DBs don't need TLS here:
-  # node-keyed licensing pins postgres, redis, and all app pods onto the single
-  # licensed app node, so DB traffic never leaves it. Disable DB TLS in LE mode
+  # "tlsv1 alert unknown ca" and app->DB TLS breaks. Disable DB TLS in LE mode
   # so the LE cert is used only for the app serving cert + ingress listener
   # (which is what fixes the backend 502 and the browser warning). Self-signed
   # mode keeps DB TLS on, unchanged. The proper alternative -- keep DB TLS via a
   # separate self-signed secret -- needs a chart change mirrored to the EKS repo
-  # (see docs/tls-letsencrypt.md). Appended AFTER tls_values so enabled=false wins.
+  # (see docs/tls-letsencrypt.md). This leaves database traffic unencrypted,
+  # potentially across nodes when multiple app nodes are licensed; see ROADMAP.md.
+  # Appended AFTER tls_values so enabled=false wins.
   db_tls_values = var.letsencrypt_enabled ? [yamlencode({
     postgresql = { tls = { enabled = false } }
     redis      = { tls = { enabled = false } }
@@ -222,10 +239,15 @@ resource "helm_release" "reloader" {
 resource "helm_release" "fortiaigate" {
   name      = "fortiaigate"
   chart     = "${path.module}/fortiaigate"
+  version   = "8.0.1"
   namespace = kubernetes_namespace.fortiaigate.metadata[0].name
   timeout   = var.helm_timeout
 
   lifecycle {
+    precondition {
+      condition     = var.agic_enabled || var.ingress_class != "azure-application-gateway"
+      error_message = "ingress_class is azure-application-gateway, but agic_enabled is false. Select an installed ingress controller or enable AGIC."
+    }
     precondition {
       condition = !var.gpu_enabled || length([
         for node_name in keys(var.licenses) : node_name
@@ -247,10 +269,13 @@ resource "helm_release" "fortiaigate" {
     # the secret when cert-manager issues the first production cert. Zero
     # resources (and an empty dependency) when letsencrypt_enabled = false.
     helm_release.reloader,
+    azurerm_role_assignment.kubelet_acr_pull,
+    azurerm_role_assignment.agic_appgw_subnet_network_contributor,
   ]
 
-  # Values are merged left-to-right; later entries take precedence.
-  # User-supplied extra_values_files go first so gpu and annotation overrides win.
+  # Values are merged left-to-right; later entries take precedence. Terraform's
+  # managed GPU, storage, ingress, TLS and license settings override extras.
+  # The set blocks below have final precedence for directly mapped variables.
   values = concat(
     [for f in var.extra_values_files : file(f)],
     local.gpu_values,
@@ -263,12 +288,24 @@ resource "helm_release" "fortiaigate" {
   )
 
   set {
+    name  = "deployment.chartRevision"
+    value = local.chart_revision
+  }
+  set {
     name  = "fortiaigate.image.repository"
     value = var.image_repository
   }
   set {
     name  = "fortiaigate.image.tag"
     value = var.image_tag
+  }
+  set {
+    name  = "triton.image.serverTag"
+    value = var.triton_image_tag
+  }
+  set {
+    name  = "triton.image.modelsTag"
+    value = var.triton_models_image_tag
   }
   set {
     name  = "fortiaigate.gpu.enabled"

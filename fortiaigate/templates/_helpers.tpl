@@ -87,3 +87,26 @@ When Helm manages the TLS secret, checksum the chart certificate files.
 {{- printf "%s%s" (tpl (.Files.Get .Values.tls.cert) $) (tpl (.Files.Get .Values.tls.key) $) | sha256sum }}
 {{- end }}
 {{- end }}
+
+{{/*
+Renders a JSON map of lowercase scanner-name -> effective maxScanChars.
+Per-scanner override (scanners.<name>.env.maxScanChars) wins; otherwise
+the global scanners.env.maxScanChars is used. Core parses this at startup
+and uses it to bind per-scanner truncation limits into the scanner-cache
+key, so changes to maxScanChars invalidate stale cache entries.
+
+Keep the scanner list here aligned with templates/scanners.yaml line 11.
+*/}}
+{{- define "fortiaigate.scannerMaxCharsByName" -}}
+{{- $globalMax := .Values.scanners.env.maxScanChars -}}
+{{- $result := dict -}}
+{{- range $scanner := list "language" "code" "promptinjection" "sensitive" "toxicity" "anonymize" "deanonymize" "customrule" -}}
+  {{- $config := index $.Values.scanners $scanner -}}
+  {{- $max := $globalMax -}}
+  {{- if and $config.env (hasKey $config.env "maxScanChars") -}}
+    {{- $max = $config.env.maxScanChars -}}
+  {{- end -}}
+  {{- $_ := set $result $scanner ($max | toString) -}}
+{{- end -}}
+{{- $result | toJson -}}
+{{- end }}

@@ -51,7 +51,7 @@ spec:
           type: RuntimeDefault
       initContainers:
       - name: model-loader
-        image: {{ .Values.fortiaigate.image.repository }}/triton-models:0.1.4
+        image: {{ .Values.fortiaigate.image.repository }}/triton-models:{{ .Values.triton.image.modelsTag }}
         imagePullPolicy: {{ .Values.fortiaigate.image.pullPolicy }}
         command: ['sh', '-c', 'cp -r /models/* /shared-models/ && echo "Models copied successfully"']
         volumeMounts:
@@ -59,7 +59,7 @@ spec:
           mountPath: /shared-models
       containers:
       - name: triton
-        image: {{ .Values.fortiaigate.image.repository }}/custom-triton:25.11-onnx-trt-agt
+        image: {{ .Values.fortiaigate.image.repository }}/custom-triton:{{ .Values.triton.image.serverTag }}
         imagePullPolicy: {{ .Values.fortiaigate.image.pullPolicy }}
         command:
           - tritonserver
@@ -126,9 +126,6 @@ spec:
         - name: model-configs
           mountPath: /models/language_model/config.pbtxt
           subPath: language_model-config.pbtxt
-        - name: model-configs
-          mountPath: /models/code_model/config.pbtxt
-          subPath: code_model-config.pbtxt
         - name: shm-memory
           mountPath: /dev/shm
         livenessProbe:
@@ -156,7 +153,7 @@ spec:
       - name: shm-memory
         emptyDir:
           medium: Memory
-          sizeLimit: 4Gi
+          sizeLimit: 6Gi
       {{- with .Values.fortiaigate.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -218,6 +215,7 @@ data:
             parameters { key: "trt_profile_max_shapes" value: "input_ids:16x512,attention_mask:16x512" }
             parameters { key: "trt_profile_opt_shapes" value: "input_ids:8x512,attention_mask:8x512" }
             parameters { key: "trt_engine_cache_enable" value: "1" }
+            parameters { key: "trt_engine_cache_path" value: "/tmp/prompt_injection_trt_cache" }
           },
           {
             name : "cuda"
@@ -298,6 +296,7 @@ data:
             parameters { key: "trt_profile_max_shapes" value: "input_ids:16x512,attention_mask:16x512" }
             parameters { key: "trt_profile_opt_shapes" value: "input_ids:8x512,attention_mask:8x512" }
             parameters { key: "trt_engine_cache_enable" value: "1" }
+            parameters { key: "trt_engine_cache_path" value: "/tmp/toxicity_trt_cache" }
           },
           {
             name : "cuda"
@@ -373,11 +372,13 @@ data:
         gpu_execution_accelerator : [
           {
             name : "tensorrt"
-            parameters { key: "precision_mode" value: "FP32" }
-            parameters { key: "trt_profile_min_shapes" value: "input_ids:1x512,attention_mask:1x512" }
-            parameters { key: "trt_profile_max_shapes" value: "input_ids:16x512,attention_mask:16x512" }
-            parameters { key: "trt_profile_opt_shapes" value: "input_ids:8x512,attention_mask:8x512" }
+            parameters { key: "precision_mode" value: "FP16" }
+            parameters { key: "max_workspace_size_bytes" value: "4294967296" }
             parameters { key: "trt_engine_cache_enable" value: "1" }
+            parameters { key: "trt_engine_cache_path" value: "/tmp/sensitive_trt_cache" }
+            parameters { key: "trt_profile_min_shapes" value: "input_ids:1x512,attention_mask:1x512,words_mask:1x512,text_lengths:1x1,span_idx:1x4608x2,span_mask:1x4608" }
+            parameters { key: "trt_profile_max_shapes" value: "input_ids:16x512,attention_mask:16x512,words_mask:16x512,text_lengths:16x1,span_idx:16x4608x2,span_mask:16x4608" }
+            parameters { key: "trt_profile_opt_shapes" value: "input_ids:8x512,attention_mask:8x512,words_mask:8x512,text_lengths:8x1,span_idx:8x4608x2,span_mask:8x4608" }
           },
           {
             name : "cuda"
@@ -411,6 +412,26 @@ data:
         name: "attention_mask"
         data_type: TYPE_INT64
         dims: [ 512 ]
+      },
+      {
+        name: "words_mask"
+        data_type: TYPE_INT64
+        dims: [ 512 ]
+      },
+      {
+        name: "text_lengths"
+        data_type: TYPE_INT64
+        dims: [ 1 ]
+      },
+      {
+        name: "span_idx"
+        data_type: TYPE_INT64
+        dims: [ 4608, 2 ]
+      },
+      {
+        name: "span_mask"
+        data_type: TYPE_BOOL
+        dims: [ 4608 ]
       }
     ]
 
@@ -418,7 +439,7 @@ data:
       {
         name: "logits"
         data_type: TYPE_FP32
-        dims: [ 512, 116 ]
+        dims: [ 384, 12, 60]
       }
     ]
 
@@ -459,6 +480,7 @@ data:
             parameters { key: "trt_profile_max_shapes" value: "input_ids:16x512,attention_mask:16x512" }
             parameters { key: "trt_profile_opt_shapes" value: "input_ids:8x512,attention_mask:8x512" }
             parameters { key: "trt_engine_cache_enable" value: "1" }
+            parameters { key: "trt_engine_cache_path" value: "/tmp/language_trt_cache" }
           },
           {
             name : "cuda"
@@ -499,86 +521,6 @@ data:
         name: "logits"
         data_type: TYPE_FP32
         dims: [ 20 ]
-      }
-    ]
-
-    # Repository agent configuration
-    model_repository_agents
-    {
-      agents [
-        {
-          name: "agent"
-          parameters [
-            {
-              key: "agent_key"
-              value: "DEFAULT_AGENT_KEY"
-            }
-          ]
-        }
-      ]
-    }
-
-  code_model-config.pbtxt: |
-    name: "code_model"
-    platform: "onnxruntime_onnx"
-    max_batch_size: 16
-
-    dynamic_batching {
-      preferred_batch_size: [ 8, 16 ]
-      max_queue_delay_microseconds: 2000
-    }
-
-
-    optimization {
-      execution_accelerators {
-        gpu_execution_accelerator : [
-          {
-            name : "tensorrt"
-            parameters { key: "precision_mode" value: "FP32" }
-            parameters { key: "trt_profile_min_shapes" value: "input_ids:1x512,attention_mask:1x512" }
-            parameters { key: "trt_profile_max_shapes" value: "input_ids:16x512,attention_mask:16x512" }
-            parameters { key: "trt_profile_opt_shapes" value: "input_ids:8x512,attention_mask:8x512" }
-            parameters { key: "trt_engine_cache_enable" value: "1" }
-          },
-          {
-            name : "cuda"
-          }
-        ]
-      }
-    }
-    instance_group [
-      {
-        count: 1
-        kind: KIND_AUTO
-        rate_limiter {
-          resources [
-            {
-              name: "gpu_slots"
-              count: 50
-            }
-          ]
-        }
-      }
-    ]
-
-    input [
-      {
-        name: "input_ids"
-        data_type: TYPE_INT64
-        dims: [ -1 ]
-      },
-      {
-        name: "attention_mask"
-        data_type: TYPE_INT64
-        dims: [ -1 ]
-      }
-    ]
-
-    output [
-      {
-        name: "logits"
-        data_type: TYPE_FP32
-        dims: [ 26 ]
       }
     ]
 

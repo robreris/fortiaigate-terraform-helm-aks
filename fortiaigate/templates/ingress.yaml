@@ -61,13 +61,13 @@ spec:
     - http:
     {{- end }}
         paths:
-          - path: /v1/
+          - path: /ui
             pathType: Prefix
             backend:
               service:
-                name: core
+                name: webui
                 port:
-                  number: 8080
+                  number: 3000
           - path: /api/
             pathType: Prefix
             backend:
@@ -79,6 +79,6 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: webui
+                name: core
                 port:
-                  number: 3000
+                  number: 8080

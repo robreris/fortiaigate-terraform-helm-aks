@@ -78,6 +78,13 @@ spec:
           value: {{ .Values.core.env.maxParallelRequests | quote }}
         - name: UPSTREAM_LLM_REQUEST_TIMEOUT
           value: {{ .Values.core.env.upstreamLlmRequestTimeout | quote }}
+        # Core includes effective scanner limits in its cache keys.
+        - name: SCANNER_MAX_SCAN_CHARS
+          value: {{ .Values.scanners.env.maxScanChars | quote }}
+        - name: SCANNER_MAX_SCAN_CHARS_BY_NAME
+          value: {{ include "fortiaigate.scannerMaxCharsByName" . | quote }}
+        - name: UPSTREAM_TLS_VERIFY
+          value: {{ .Values.core.env.upstreamTls.verify | quote }}
         - name: FORTIAIGATE_LOG_LEVEL
           value: {{ .Values.fortiaigate.env.logLevel | quote }}
         {{- if .Values.tls.enabled }}

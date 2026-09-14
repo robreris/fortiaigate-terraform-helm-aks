@@ -10,13 +10,16 @@ location = "eastus"
 # delete everything in this RG.
 resource_group_name = "fortiaigate-prod"
 cluster_name        = "fortiaigate-prod"
-image_tag           = "V8.0.0-build0024"
+# build0031 image set. Match all three tags to the images pushed to your ACR.
+image_tag               = "V8.0.1-build0031"
+triton_image_tag        = "25.11-onnx-trt-agt-s1"
+triton_models_image_tag = "0.1.6-s1"
 # Number of LICENSED app nodes — node-keyed licensing pins all pods to licensed
 # nodes, so this must equal your app-node license count. app_node_max_pods
 # (default 110) lets the full service set fit per node.
-app_node_count      = 3
+app_node_count = 3
 
-gpu_enabled      = true
+gpu_enabled = true
 # A10 (24 GB, SM 86) — Fortinet-supported with the right VRAM/compute; the older
 # V100 fails TensorRT 10. A10/A100 quota defaults to 0 — request it first.
 # See docs/gpu-triton-compatibility.md.
@@ -32,10 +35,8 @@ ingress_host  = "fortiaigate.example.com"
 # certificate for production; tls.tf only generates a bootstrap self-signed
 # certificate. See docs/application-gateway-dns-tls.md.
 ingress_annotations = {
-  "appgw.ingress.kubernetes.io/backend-protocol"          = "https"
-  "appgw.ingress.kubernetes.io/ssl-redirect"              = "true"
-  "appgw.ingress.kubernetes.io/health-probe-path"         = "/"
-  "appgw.ingress.kubernetes.io/health-probe-status-codes" = "200-399"
+  "appgw.ingress.kubernetes.io/backend-protocol" = "https"
+  "appgw.ingress.kubernetes.io/ssl-redirect"     = "true"
 }
 
 storage_size         = "500Gi"

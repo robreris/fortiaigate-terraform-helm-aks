@@ -9,15 +9,15 @@ A single Terraform stack that stands up FortiAIGate on Azure AKS:
 - Resource Group + VNet + AKS cluster + app/GPU node pools
 - Azure Files storage account (required — the chart's shared PVC is `ReadWriteMany`, which Azure managed disks cannot satisfy)
 - Application Gateway Ingress Controller (AGIC) addon (conditional)
-- The `fortiaigate/` Helm chart (local path, shared with the EKS stack), which bundles Bitnami PostgreSQL and Redis subcharts
+- The local `fortiaigate/` Helm chart, based on the 8.0.1/build0031 archive with AKS-specific patches, which bundles Bitnami PostgreSQL and Redis subcharts
 
 There is no application source code here — this repo is purely IaC. FortiAIGate container images come from an external registry referenced via `var.image_repository` (typically Azure Container Registry, e.g. `<name>.azurecr.io/fortiaigate`).
 
-This repo is the Azure twin of `fortiaigate-terraform-helm-eks` (sibling working directory at `/home/robert/GitRepos/robreris/fortiaigate-terraform-helm-eks`). The Helm chart under `fortiaigate/` is intentionally identical between the two — only the Terraform root differs. When changing the chart, change it in both repos.
+This repo is the Azure twin of `fortiaigate-terraform-helm-eks` (sibling working directory at `/home/robert/GitRepos/robreris/fortiaigate-terraform-helm-eks`). Its Helm chart carries AKS-specific ingress, TLS, license, storage, and GPU placement changes. Build0031 model configurations and application settings come from `../FortiAIGate-on-EKS/v801-builds/build0031/images/FAIG_helm_chart-V8.0.1-build0031-FORTINET.tar.gz`. Keep platform patches when importing later builds; do not replace the chart wholesale.
 
 ## Current state
 
-**Deployed and validated end-to-end** (full clean rebuild on 2026-05-28). The two-step apply path works from scratch: cluster (`fortiaigate-dev`, K8s 1.35) with one licensed app node (`max_pods` 110) + one A10 GPU node, all services running including Triton on the A10 and PostgreSQL on `managed-csi`. The one operational caveat is licensing, not infra — see below.
+The **8.0.0 chart** was deployed and validated end-to-end in a full clean rebuild on 2026-05-28: cluster (`fortiaigate-dev`, K8s 1.35) with one licensed app node (`max_pods` 110) + one A10 GPU node, all services running including Triton on the A10 and PostgreSQL on `managed-csi`. The 8.0.1/build0031 chart has passed offline rendering and configuration checks but still needs a live AKS rollout test. Licensing remains an operational caveat — see below.
 
 For a **from-scratch deploy** (new subscription/operator), the sequence is:
 
@@ -79,7 +79,7 @@ To switch subscriptions: `az account set --subscription <id>`, then `terraform i
 
 **Azure Files (not Azure Disks) backs the shared PVC — but NOT the databases.** `storage.tf` provisions a Premium FileStorage account, grants the AKS kubelet identity `Storage Account Contributor` and `Storage File Data SMB Share Contributor`, and creates an `azurefile-fortiaigate` StorageClass pinned to that account. Azure managed disks are RWO only and cannot satisfy the chart's RWX claim. If Azure Files performance is insufficient, switch to Azure NetApp Files (NFSv4.1) — that requires a delegated subnet and ANF capacity pool, neither of which this stack creates.
 
-**PostgreSQL and Redis run on Azure Disk, not the shared Azure Files claim.** The chart's `values.yaml` defaults both Bitnami subcharts to `existingClaim: "fortiaigate-storage"` (the RWX SMB share), but PostgreSQL's `initdb` fails on SMB — it needs a data dir owned by the db user at 0700 with POSIX fsync/locking, which CIFS/SMB cannot provide, so the pod crashloops (exit 1) right before initdb. `local.db_storage_values` in `helm.tf` overrides both to dynamically-provisioned RWO disks via `var.db_storage_class` (default `managed-csi`). Done Terraform-side, not in the chart, so the chart stays identical to the EKS stack — the EKS root needs its own equivalent override (gp3/EBS) and likely has the same latent EFS issue. Switching an *already-deployed* postgres/redis from `existingClaim` to a volumeClaimTemplate requires deleting the StatefulSets first (`volumeClaimTemplates` is immutable); safe pre-first-successful-init since there's no data.
+**PostgreSQL and Redis run on Azure Disk, not the shared Azure Files claim.** The chart's `values.yaml` defaults both Bitnami subcharts to `existingClaim: "fortiaigate-storage"` (the RWX SMB share), but PostgreSQL's `initdb` fails on SMB — it needs a data dir owned by the db user at 0700 with POSIX fsync/locking, which CIFS/SMB cannot provide, so the pod crashloops (exit 1) right before initdb. `local.db_storage_values` in `helm.tf` overrides both to dynamically-provisioned RWO disks via `var.db_storage_class` (default `managed-csi`). This platform-specific override stays in Terraform. Switching an *already-deployed* postgres/redis from `existingClaim` to a volumeClaimTemplate requires deleting the StatefulSets first (`volumeClaimTemplates` is immutable); safe pre-first-successful-init since there's no data.
 
 **AGIC is enabled via the AKS addon, not a separate Helm release.** `azurerm_kubernetes_cluster.this.ingress_application_gateway` (conditional on `var.agic_enabled`) tells AKS to create and manage an Application Gateway in the `appgw` subnet. Disable it to use ingress-nginx or the web_app_routing addon instead. When AGIC is disabled, the ingress resource still gets created by the chart but stays without an address until an externally-managed controller picks it up.
 

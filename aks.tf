@@ -98,9 +98,11 @@ resource "azurerm_kubernetes_cluster_node_pool" "gpu" {
   # (and a new node name, which re-keys licenses) on the very next apply.
   gpu_driver           = "Install"
   auto_scaling_enabled = true
-  min_count            = 0
-  max_count            = 1
-  node_count           = 1
+  # Keep the licensed hostname alive between bootstrap and workload install.
+  # Scaling to zero can replace it with an unlicensed hostname on scale-up.
+  min_count  = 1
+  max_count  = 1
+  node_count = 1
 
   node_labels = {
     fortiaigate-role = "gpu"
@@ -109,6 +111,10 @@ resource "azurerm_kubernetes_cluster_node_pool" "gpu" {
   node_taints = [
     "fortiaigate-gpu=true:NoSchedule",
   ]
+
+  lifecycle {
+    ignore_changes = [node_count]
+  }
 }
 
 # AcrPull for the kubelet identity so nodes can pull the FortiAIGate images.

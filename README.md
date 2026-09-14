@@ -2,9 +2,13 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Terraform](https://img.shields.io/badge/terraform-%E2%89%A51.5-623CE4.svg)](https://www.terraform.io/)
-[![Kubernetes](https://img.shields.io/badge/kubernetes-1.31-326CE5.svg)](https://kubernetes.io/)
+[![Kubernetes](https://img.shields.io/badge/kubernetes-1.35-326CE5.svg)](https://kubernetes.io/)
 
 Terraform stack that deploys FortiAIGate on Azure AKS.
+
+The local Helm chart is based on the downloaded FortiAIGate 8.0.1/build0031
+chart, with AKS-specific ingress, storage, TLS, license, and GPU placement
+patches. The default application and Triton image tags match build0031.
 
 ## What you get
 
@@ -22,7 +26,7 @@ Terraform stack that deploys FortiAIGate on Azure AKS.
 - Terraform `>= 1.5`
 - Azure CLI signed in (`az login`) with rights to:
   - Create resource groups, VNets, AKS clusters, role assignments, and storage accounts in the target subscription.
-  - The signed-in principal becomes the AKS cluster admin via the default AAD passthrough behavior.
+  - Retrieve AKS credentials. Terraform currently authenticates to Kubernetes using the client certificate emitted by AKS; this stack does not configure Entra ID integration.
 - A container registry holding the FortiAIGate images (typically an Azure Container Registry — `<name>.azurecr.io`). The AKS kubelet identity must have `AcrPull` on it or every pod stalls in `ImagePullBackOff`. This stack **can** codify that grant: set `acr_id` in your tfvars and the kubelet identity is granted `AcrPull` automatically (the Terraform SP then needs role-assignment write on the ACR's scope). Leave `acr_id` empty if the ACR and its grant are managed in another stack. See [docs/registry-and-images.md](docs/registry-and-images.md) for creating the registry, pushing the images, and the grant.
 - **GPU quota (if `gpu_enabled = true`).** The default GPU SKU is an A10 (`Standard_NV36ads_A10_v5`), and the A10/A100 vCPU quota families default to **0** in most regions — request a quota increase (e.g. *Standard NVADSA10v5 Family vCPUs* → 36) in the target region **before** the first apply, or step 1 fails creating the GPU pool. See [docs/gpu-triton-compatibility.md](docs/gpu-triton-compatibility.md).
 - One-time per-subscription bootstrap of remote state: a Resource Group, Storage Account, and Container for the Terraform state blob — see [docs/remote-state.md](docs/remote-state.md).
@@ -108,6 +112,9 @@ To switch subscriptions, set the AZ context (`az account set --subscription <id>
 | `gpu_enabled` | `false` | Set true to add the GPU node pool + nvidia-device-plugin Helm release + Triton workloads. Needs a supported GPU + quota (see prerequisites). |
 | `gpu_node_vm_size` | `Standard_NV36ads_A10_v5` | A10 (24 GB, SM 86). Must be a Fortinet-supported GPU with ≥24 GB VRAM and SM 75+; the V100 fails. |
 | `acr_id` | `""` | Set to the ACR resource ID to codify the kubelet `AcrPull` grant; leave empty if managed elsewhere. |
+| `image_tag` | `V8.0.1-build0031` | Application image tag; does not set Triton image tags. |
+| `triton_image_tag` | `25.11-onnx-trt-agt-s1` | `custom-triton` tag when GPU is enabled. |
+| `triton_models_image_tag` | `0.1.6-s1` | `triton-models` tag when GPU is enabled. |
 | `db_storage_class` | `managed-csi` | Block (RWO) StorageClass for PostgreSQL/Redis — they cannot run on the shared Azure Files (SMB) class. |
 | `agic_enabled` | `true` | Disable to use ingress-nginx or web_app_routing instead. |
 | `ingress_class` | `azure-application-gateway` | Must match the installed controller. |
@@ -117,6 +124,34 @@ To switch subscriptions, set the AZ context (`az account set --subscription <id>
 | `licenses` | `{}` | `{ "aks-app-xxxxxxxx-vmss000000" = "licenses/APP.lic", "aks-gpu-xxxxxxxx-vmss000000" = "licenses/GPU.lic" }`. Populate after step 1 with the real node names; include the GPU node when `gpu_enabled = true`. |
 
 Full list in `variables.tf`.
+
+The Terraform defaults and tfvars examples select the build0031 image set.
+Set all three image tag variables explicitly when moving to a later build.
+This repository does not bundle images; the
+[registry guide](docs/registry-and-images.md) records the names and tags
+verified from the sibling build0031 archives.
+
+Upgrading an existing release from the earlier chart changes the Ingress paths
+to build0031's `/ui` → webui, `/api/` → api, and `/` → core, and replaces the
+Triton model configuration with build0031's definitions. Review the Helm plan
+and follow the [live deployment checklist](docs/testing.md) before applying
+to a populated environment. This chart version has passed offline tests but
+has not yet completed a live AKS rollout.
+
+Terraform owns the local `fortiaigate` Helm release. `helm.tf` passes the
+variables above into chart values; its `set` blocks take precedence over
+`extra_values_files`. Terraform also overrides extra values for GPU placement,
+Azure Disk database storage, AGIC annotations, TLS, and licensed node affinity.
+Use `extra_values_files` for chart settings without a dedicated Terraform
+variable, such as per-service resource requests or replica counts. Changing the
+chart's defaults alone does not change values already supplied by Terraform.
+
+## Testing and release readiness
+
+Run the local checks in [CONTRIBUTING.md](CONTRIBUTING.md), then follow the
+[deployment test checklist](docs/testing.md) in a dedicated Azure subscription.
+The [roadmap](ROADMAP.md) records remaining production gaps; the production
+tfvars example is a starting configuration, not a high-availability guarantee.
 
 ## Documentation
 

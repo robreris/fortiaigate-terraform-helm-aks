@@ -1,8 +1,8 @@
 # GPU compatibility for Triton (Azure)
 
-Triton is the only GPU workload in this stack. The bundled image
-(`custom-triton:25.11-onnx-trt-agt`, set in
-`fortiaigate/templates/triton-server.yaml`) ships **TensorRT 10.x**, which
+Triton is the only GPU workload in this stack. The build0031 image
+(`custom-triton:25.11-onnx-trt-agt-s1`, set through
+`var.triton_image_tag`) is expected to use **TensorRT 10.x**, which
 **dropped support for NVIDIA Volta (compute capability SM 70)**. On a Volta GPU
 the Triton pod crashes at engine-build time with:
 
@@ -11,20 +11,20 @@ IBuilder::buildSerializedNetwork: Error Code 9: API Usage Error
 (Target GPU SM 70 is not supported by this TensorRT release.)
 ```
 
-This is **not** a regression — the `25.11` tag has been pinned since the chart's
-first commit. It only surfaces on Azure because of the GPU the AKS stack was
-scaffolded with.
+This incompatibility was exposed when the original AKS deployment used a V100.
+The current default GPU VM size is an A10.
 
 ## Why AWS (EKS) never hit this
 
-The Helm chart is intentionally identical between the EKS and AKS stacks, so the
-Triton image is the same in both. The difference is the GPU hardware each cloud
-was pointed at:
+The original EKS deployment used an A10G, while the first AKS configuration
+used a V100. The chart copies now have platform-specific changes; align the
+Triton image tags explicitly when comparing deployments:
 
 | Stack | Default GPU node | GPU | Compute | TensorRT 10 |
 |-------|------------------|-----|---------|-------------|
 | AWS / EKS | `g5.2xlarge` | A10G | SM 86 (Ampere) | ✅ works |
-| Azure / AKS | `Standard_NC6s_v3` | V100 | SM 70 (Volta) | ❌ rejected |
+| Azure / AKS (original) | `Standard_NC6s_v3` | V100 | SM 70 (Volta) | ❌ rejected |
+| Azure / AKS (current default) | `Standard_NV36ads_A10_v5` | A10 | SM 86 (Ampere) | ✅ compatible |
 
 The fix is to put AKS on a GPU that satisfies **both** constraints below — the
 same class of card AWS already runs — by changing `var.gpu_node_vm_size`.
@@ -39,7 +39,7 @@ same class of card AWS already runs — by changing `var.gpu_node_vm_size`.
 
 > **The T4 does NOT qualify.** It is SM 75 (passes constraint 1) but has only
 > **16 GB VRAM** and is **not on Fortinet's supported list** (fails constraint 2).
-> The current V100 fails both (SM 70 and 16 GB). Do not use either.
+> A V100 fails both (SM 70 and 16 GB). Do not use either.
 
 ## Supported GPU SKUs on Azure
 
@@ -113,10 +113,9 @@ If quota can't be obtained, the alternatives are:
 
 - **Volta-compatible Triton image** — keep the V100 and pin an older
   `custom-triton` build (TensorRT 8.6 was the last to support Volta, or a build
-  using the CUDA/ONNX-Runtime EP instead of the TensorRT EP). The tag is
-  currently **hardcoded** in `fortiaigate/templates/triton-server.yaml`; this
-  would need the tag made configurable **and** a compatible image published to
-  the ACR. Owned on the FortiAIGate image-build side, not in this repo.
+  using the CUDA/ONNX-Runtime EP instead of the TensorRT EP). Set
+  `triton_image_tag` to a compatible image published to the ACR; the image
+  build and compatibility testing are outside this repo.
 - **Disable GPU/Triton** — set `gpu_enabled = false` for a clean deploy. Note
   the scanners are thick-client/thin-server against Triton, so inference does
   not function in this mode — it is an unblock, not a finished deployment.

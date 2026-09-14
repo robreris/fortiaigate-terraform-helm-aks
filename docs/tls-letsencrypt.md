@@ -201,17 +201,15 @@ cert-manager swaps in the real cert when issuance completes.
   `health-probe-status-codes` in `ingress_annotations`** (they override the
   per-backend probes globally). This DID touch the shared `fortiaigate/` chart
   (readiness probes added to `api.yaml`/`webui.yaml`); the change was mirrored to
-  the EKS repo to keep the charts identical. Browser entry point is **`/ui`**, not
+  the EKS repo at the time. Browser entry point is **`/ui`**, not
   `/`.
 
 ## Planned follow-up: Option B — keep DB TLS via a separate self-signed secret (AKS-only)
 
 Status: **not implemented** (current behavior is DB-TLS-off in LE mode, above).
-Decision: implement this **AKS-only** — the AKS `fortiaigate/` chart will
-**intentionally diverge** from the EKS copy. The two charts are independent file
-copies (no code coupling); "keep them identical" is a convention, and they
-already differ in `templates/scanners.yaml`. When this lands, update the
-"identical chart" language in `CLAUDE.md` so the divergence reads as deliberate.
+Decision: implement this **AKS-only**. The AKS `fortiaigate/` chart already
+differs from the EKS copy through platform-specific patches; this follow-up
+would add an internal database certificate without changing the EKS chart.
 
 **Goal:** restore in-cluster TLS for postgres/redis while the public ingress/app
 serving cert stays Let's Encrypt — by splitting the DB role onto its own

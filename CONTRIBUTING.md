@@ -7,10 +7,10 @@ Thanks for your interest in improving the FortiAIGate Terraform + Helm deploymen
 Please open a GitHub issue and include:
 
 - Terraform version (`terraform version`)
-- AWS region
+- Azure region
 - The relevant `.tfvars` (with secrets redacted)
 - The output of `terraform plan` or the exact error message
-- Whether you ran the two-step bootstrap (`-target=module.vpc -target=module.eks` first)
+- Whether you ran the two-step bootstrap (the infrastructure targets in README.md first)
 
 For security vulnerabilities, do **not** open a public issue — see [SECURITY.md](./SECURITY.md).
 
@@ -19,9 +19,10 @@ For security vulnerabilities, do **not** open a public issue — see [SECURITY.m
 You need:
 
 - Terraform 1.5+
-- AWS CLI v2
+- Azure CLI
 - Helm 3
-- [`tflint`](https://github.com/terraform-linters/tflint) — same checks CI runs
+- Python 3.10+ for Helm rendering checks
+- [`tflint`](https://github.com/terraform-linters/tflint) v0.53.0 — same checks CI runs
 - [`terraform-docs`](https://terraform-docs.io/) — regenerates the README input table
 - [`pre-commit`](https://pre-commit.com/) — runs all of the above before each commit
 
@@ -43,21 +44,24 @@ You can also run the individual checks:
 
 ```bash
 terraform fmt -recursive -check
-terraform init -backend=false
+terraform init -backend=false -lockfile=readonly
 terraform validate
+tflint --init
 tflint --recursive
-helm lint fortiaigate
+python3 -m pip install -r tests/requirements.txt
+python3 -m unittest discover -s tests -v
 ```
 
-CI runs the same set on every PR (`.github/workflows/terraform.yml`).
+CI runs formatting, validation, TFLint, and Helm rendering checks on every PR (`.github/workflows/terraform.yml`).
 
 ## Pull requests
 
 - Branch from `main`. Keep PRs focused on a single concern.
 - Include a `terraform plan` excerpt in the description when the change affects infrastructure resources, not just docs/CI.
-- Update `CHANGELOG.md` under the `## [Unreleased]` section.
+- Update `CHANGELOG.md` under the `## Unreleased` section.
 - If you change variables, run `terraform-docs` (or let pre-commit run it) so the README input table stays in sync.
-- New examples go under `examples/<scenario>/terraform.tfvars` with placeholder values, plus an entry in `examples/README.md`.
+- Keep environment templates under `tfvars/*.tfvars.example`, using placeholder values only.
+- Validate from a clean checkout or temporary directory so ignored local tfvars and backend state do not affect checks.
 
 ## Versioning
 

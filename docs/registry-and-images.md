@@ -30,7 +30,7 @@ third, so state and images survive untouched.
 
 **Do not put the ACR in the cluster RG.** It works at first, but the
 first time you run `terraform destroy` it deletes the registry along
-with all ~26 GB of pushed images. Re-pushing those is slow. Worse, if
+with all pushed images. Re-pushing those is slow. Worse, if
 the kubelet `AcrPull` grant references the old ACR resource ID and you
 recreate the registry under the same name, the grant won't transfer —
 you'll have to re-create it.
@@ -51,13 +51,17 @@ dedicated `$ACR_RG` separate from the cluster RG.
 
 ## Sizing the SKU
 
-Total compressed footprint of the FortiAIGate image set is ~25.8 GB (v8.0.0).
+The eight build0031 Docker archives in the sibling checkout total 21.29 GB
+(19.83 GiB) on disk. This is the size of the supplied tar files, not a measured
+ACR storage bill: it stores layers differently from Docker tar archives.
+Monitor usage after import and review [Azure's current SKU limits](https://learn.microsoft.com/en-us/azure/container-registry/container-registry-skus)
+before choosing a tier.
 
 | SKU | Included storage | Geo-replication | Private endpoints | Notes |
 |-----|------------------|-----------------|-------------------|-------|
-| Basic | 10 GB | No | No | **Too small** — image set won't fit |
-| Standard | 100 GB | No | No | Fine for single-region dev/test |
-| Premium | 500 GB | Yes | Yes | Required for private link, content trust, geo-replication |
+| Basic | 10 GiB | No | No | Storage beyond the included amount is billed; lower throughput |
+| Standard | 100 GiB | No | No | Fine for single-region dev/test |
+| Premium | 500 GiB | Yes | Yes | Required for private link and geo-replication |
 
 For a private/internal deployment (`var.internal = true` on this stack)
 Premium is usually the right choice so the registry can sit behind a
@@ -67,15 +71,15 @@ Standard is enough.
 ## Variables to set
 
 ```bash
-export LOCATION="eastus"
+export LOCATION="westus"
 export ACR_RG="fortiaigate-acr"
 export ACR_NAME="fortiaigateacr$(echo $ARM_SUBSCRIPTION_ID | tr -d '-' | tail -c 9)"
 export ACR_SKU="Standard"     # or Premium
 export IMAGE_PREFIX="fortiaigate"
-export BUILD="build0024"      # source of the .tar archives
-export TAG="V8.0.0-${BUILD}"
-export TRITON_TAG="25.11-onnx-trt-agt"
-export TRITON_MODELS_TAG="0.1.4"
+export BUILD="build0031"      # supplied image archives and Helm chart
+export TAG="V8.0.1-${BUILD}"
+export TRITON_TAG="25.11-onnx-trt-agt-s1"
+export TRITON_MODELS_TAG="0.1.6-s1"
 ```
 
 Validate the ACR name (5-50 alphanumerics, globally unique):
@@ -126,45 +130,84 @@ az role assignment create \
 
 ## Step 3 — Load and push the image archives
 
-Image archives live in `../FortiAIGate/build0024/images/` (or
-`build0021/images/` for the legacy single-node build). Each `.tar` is a
-`docker save` of one image tagged with its original Fortinet JFrog path
-(`dops-jfrog.fortinet-us.com/docker-fortiaigate-local/<name>:<tag>`).
+The eight image archives and
+`FAIG_helm_chart-V8.0.1-build0031-FORTINET.tar.gz` are in
+`../FortiAIGate-on-EKS/v801-builds/build0031/images/`. The chart archive was
+extracted and rendered for this review. The source repository/tag pairs below
+were also verified directly from each Docker archive's `manifest.json`.
+
+The deployment chart requires these repositories under `IMAGE_PREFIX`:
+
+| Repository | Tag for build0031 | Used by |
+|------------|-------------------|---------|
+| `api`, `core`, `webui`, `logd`, `license_manager`, `scanner` | `V8.0.1-build0031` | Application services |
+| `custom-triton` | `25.11-onnx-trt-agt-s1` | Triton server, when GPU is enabled |
+| `triton-models` | `0.1.6-s1` | Triton model loader, when GPU is enabled |
+
+All eight archive manifests use the source repository prefix
+`dops-jfrog.fortinet-us.com/docker-fortiaigate-local` with the names and tags
+above. The extracted Helm chart renders those same eight references when its
+application repository is set. Its bundled PostgreSQL and Redis images are
+listed separately below.
+
+This AKS chart now uses the extracted 8.0.1/build0031 model configuration and
+application settings while retaining AKS-specific GPU placement, ingress,
+license/TLS ownership, and storage behavior. The upstream archive is therefore
+still **not** a direct drop-in replacement. Image and offline chart checks do
+not establish runtime compatibility until a live AKS deployment is tested.
 
 The pattern for each image is `docker load → docker tag → docker push`:
 
 ```bash
-export IMAGES_DIR="../FortiAIGate/${BUILD}/images"
+export IMAGES_DIR="../FortiAIGate-on-EKS/v801-builds/${BUILD}/images"
 export ACR_PREFIX="${ACR_NAME}.azurecr.io/${IMAGE_PREFIX}"
-export SRC_PREFIX="dops-jfrog.fortinet-us.com/docker-fortiaigate-local"
+
+# Stop before any push if the verified archives are missing.
+for img in api core webui logd license_manager scanner custom-triton triton-models; do
+  test -f "${IMAGES_DIR}/FAIG_${img}-${TAG}-FORTINET.tar" || {
+    echo "Missing ${IMAGES_DIR}/FAIG_${img}-${TAG}-FORTINET.tar; check the supplied archive names" >&2
+    exit 1
+  }
+done
+
+# docker load prints the image's embedded source reference. Check its name and
+# tag before retagging it for ACR.
+push_archive() {
+  local name="$1" dest_tag="$2" archive loaded source_image
+  archive="${IMAGES_DIR}/FAIG_${name}-${TAG}-FORTINET.tar"
+  loaded="$(docker load -i "$archive")" || return
+  printf '%s\n' "$loaded"
+  source_image="$(printf '%s\n' "$loaded" | sed -n 's/^Loaded image: //p')"
+  if [[ -z "$source_image" || "$source_image" == *$'\n'* ]]; then
+    echo "Expected one tagged image in $archive; inspect docker load output" >&2
+    return 1
+  fi
+  if [[ "${source_image##*/}" != "${name}:${dest_tag}" ]]; then
+    echo "Unexpected source image $source_image in $archive" >&2
+    return 1
+  fi
+  docker tag "$source_image" "${ACR_PREFIX}/${name}:${dest_tag}" || return
+  docker push "${ACR_PREFIX}/${name}:${dest_tag}"
+}
 
 # Versioned FortiAIGate images (api/core/webui/logd/license_manager/scanner)
 for img in api core webui logd license_manager scanner; do
-  docker load -i "${IMAGES_DIR}/FAIG_${img}-${TAG}-FORTINET.tar"
-  docker tag  "${SRC_PREFIX}/${img}:${TAG}"  "${ACR_PREFIX}/${img}:${TAG}"
-  docker push "${ACR_PREFIX}/${img}:${TAG}"
+  push_archive "$img" "$TAG" || exit 1
 done
 
 # Custom Triton (different tag scheme)
-docker load -i "${IMAGES_DIR}/FAIG_custom-triton-${TAG}-FORTINET.tar"
-docker tag  "${SRC_PREFIX}/custom-triton:${TRITON_TAG}"  "${ACR_PREFIX}/custom-triton:${TRITON_TAG}"
-docker push "${ACR_PREFIX}/custom-triton:${TRITON_TAG}"
+push_archive custom-triton "$TRITON_TAG" || exit 1
 
 # Triton models repo (different tag scheme)
-docker load -i "${IMAGES_DIR}/FAIG_triton-models-${TAG}-FORTINET.tar"
-docker tag  "${SRC_PREFIX}/triton-models:${TRITON_MODELS_TAG}"  "${ACR_PREFIX}/triton-models:${TRITON_MODELS_TAG}"
-docker push "${ACR_PREFIX}/triton-models:${TRITON_MODELS_TAG}"
+push_archive triton-models "$TRITON_MODELS_TAG" || exit 1
 ```
 
 Notes:
 
-- The Triton tags (`25.11-onnx-trt-agt`, `0.1.4`) are independent of the
-  FortiAIGate build version. They may drift between builds — verify by
-  inspecting the loaded image tag after `docker load`.
-- Each push of the larger archives (`custom-triton` ~9.7 GB, `scanner`
-  ~5.7 GB, `triton-models` ~3.6 GB) will saturate your uplink. On a
-  slow connection, run from an Azure VM in the same region as the ACR
-  to push over the Azure backbone instead.
+- Triton tags are independent of the application tag. Check the loaded image
+  references and match all three Terraform tag variables to the pushed tags.
+- These archives may be large. On a slow connection, run from an Azure VM in
+  the same region as the ACR to push over the Azure backbone instead.
 - ACR does not require pre-creating repositories — the path
   `fortiaigate/api` is created implicitly on the first push to it.
 
@@ -182,12 +225,15 @@ for repo in api core webui logd license_manager scanner custom-triton triton-mod
 done
 ```
 
-You should see all eight repos under `fortiaigate/` with the correct
-tags. Then set the Terraform variable:
+You should see all eight repos under `fortiaigate/` with the exact tags in the
+table above. Set the Terraform variables to the same image set:
 
 ```hcl
 # tfvars/dev.tfvars
 image_repository = "fortiaigateacrXXXX.azurecr.io/fortiaigate"
+image_tag                = "V8.0.1-build0031"
+triton_image_tag         = "25.11-onnx-trt-agt-s1"
+triton_models_image_tag  = "0.1.6-s1"
 ```
 
 ## Alternative: `az acr import` instead of pull/load/push
@@ -206,9 +252,11 @@ az acr import \
 
 This bypasses the local `docker load`/`docker push` round-trip
 entirely and is the fastest path when the source is reachable. The
-`.tar` archives in `../FortiAIGate/build0024/images/` are the
-distribution mechanism for sites that can't reach Fortinet's registry
-directly; if you have direct access, `az acr import` is preferable.
+`.tar` archives, when supplied, are the distribution mechanism for sites
+that cannot reach Fortinet's registry directly. If you have direct access,
+`az acr import` is an alternative. The eight archive manifests confirm the
+JFrog source prefix and tags in this example; direct source-registry access
+still depends on your credentials and network path.
 
 ## Common failure modes
 
@@ -218,31 +266,36 @@ directly; if you have direct access, `az acr import` is preferable.
 | `denied: requested access to the resource is denied` | Principal lacks `AcrPush` | Step 2 — grant `AcrPush` on the registry scope |
 | Pod stuck in `ImagePullBackOff` with `401 Unauthorized` from `*.azurecr.io` | Kubelet identity missing `AcrPull` | See [Later: grant `AcrPull` once the cluster exists](#later-grant-acrpull-once-the-cluster-exists), then `kubectl delete pod <name>` to retry |
 | `MANIFEST_UNKNOWN` from kubelet | Tag mismatch — the chart's `image.tag` doesn't match what was pushed | Compare `kubectl describe pod` against `az acr repository show-tags` |
-| `no space left on device` during push | Local Docker storage exhausted by the ~26 GB image set | `docker system prune -a` between pushes, or push from an Azure VM with a larger disk |
+| `no space left on device` during push | Local Docker storage exhausted by the image set | Use a larger Docker data disk or push from an Azure VM with sufficient space |
 | Push hangs / very slow | Pushing over a residential link | Run from an Azure VM in the same region as the registry |
 
 ## What this stack does (and doesn't) consume from the registry
 
-`helm.tf` passes `var.image_repository` straight through to the chart
-as `global.image.repository`. Each subchart appends its image name
-(`/api`, `/core`, `/scanner`, etc.) and uses tags from the chart's
-`values.yaml` — currently `V8.0.0-build0024` for the FortiAIGate images
-and `25.11-onnx-trt-agt` / `0.1.4` for Triton. If you push under
-different tags, override them in `var.extra_values_files` rather than
-editing the chart.
+`helm.tf` passes `var.image_repository` to `fortiaigate.image.repository`.
+The chart appends each image name (`/api`, `/core`, `/scanner`, etc.). Set
+`image_tag` for the application images, `triton_image_tag` for `custom-triton`,
+and `triton_models_image_tag` for `triton-models` in your tfvars. Their defaults
+are `V8.0.1-build0031`, `25.11-onnx-trt-agt-s1`, and `0.1.6-s1`, respectively.
+The defaults now select build0031; set all three variables explicitly for
+later builds. Terraform `set` blocks
+take precedence over `extra_values_files` for these image settings.
 
-The bundled Bitnami PostgreSQL and Redis subcharts pull from Docker Hub
-by default. If your cluster has no outbound internet, you'll need to
-mirror those into ACR too and override `postgresql.image.registry` and
-`redis.image.registry` in a values file — but that's beyond the scope
-of this doc.
+The eight FortiAIGate repositories are not the complete set of images pulled
+by AKS. With the bundled databases enabled, the current chart also renders
+`docker.io/bitnamilegacy/postgresql:17.4.0-debian-12-r19`,
+`docker.io/bitnamilegacy/redis:8.2.0-debian-12-r0`, and
+`docker.io/bitnamilegacy/os-shell:12-debian-12-r50` (PostgreSQL init container).
+These are not in the FortiAIGate archive set. The optional NVIDIA device
+plugin, cert-manager, and Reloader Helm releases pull further images from their
+own chart defaults. For a network-restricted cluster, mirror those images and
+set the corresponding subchart/release image values before deployment.
 
 ## Later: grant `AcrPull` once the cluster exists
 
-This is the open follow-up called out in `CLAUDE.md`. It is **not part
-of the build-and-push workflow** — defer it until after the first
-`terraform apply` has created the AKS cluster (specifically the
-targeted `azurerm_kubernetes_cluster.this` step of the two-step apply).
+This is **not part of the build-and-push workflow** — the cluster identity
+does not exist until after the targeted AKS bootstrap apply. Set `acr_id` in
+tfvars to let Terraform create the `AcrPull` grant during the full apply. Use
+the manual commands below only when that grant is managed outside this stack.
 The AKS cluster uses a **user-assigned kubelet identity** distinct from
 the cluster's control-plane identity, and that identity needs `AcrPull`
 on the registry so nodes can pull images without per-pod

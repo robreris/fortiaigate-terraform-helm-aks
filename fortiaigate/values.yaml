@@ -24,15 +24,14 @@ global:
 fortiaigate:
   # Common image configuration.
   # Terraform sets these from var.image_repository and var.image_tag (see helm.tf).
-  # The placeholder defaults below exist so `helm lint` and `helm template`
-  # render valid YAML when the chart is exercised standalone — they are not
-  # valid for an actual install.
+  # A placeholder registry keeps standalone lint/template commands valid;
+  # Terraform supplies the real image repository for deployment.
   image:
     # Example:
     # repository: 192.168.0.1:5000
-    # tag: v8.0.0-build0001
+    # tag: V8.0.1-build0031
     repository: "example.com/fortiaigate"
-    tag: "latest"
+    tag: "V8.0.1-build0031"
     pullPolicy: IfNotPresent
     pullSecrets: []
 
@@ -67,10 +66,10 @@ api:
   resources:
     limits:
       cpu: 500m
-      memory: 512Mi
+      memory: 1Gi
     requests:
       cpu: 250m
-      memory: 256Mi
+      memory: 1Gi
 
 # Web UI Configuration
 webui:
@@ -96,6 +95,9 @@ core:
     maxParallelRequests: 100
     # Timeout in seconds for requests from AI Gateway to upstream LLM providers (e.g. OpenAI, Anthropic)
     upstreamLlmRequestTimeout: 600
+    # Build0031 core uses this flag for outbound LLM TLS verification.
+    upstreamTls:
+      verify: true
 
   resources:
     limits:
@@ -111,10 +113,16 @@ core:
 triton:
   replicas: 1
 
+  # These images use independent tags from the FortiAIGate application images.
+  # Terraform sets them from triton_image_tag and triton_models_image_tag.
+  image:
+    serverTag: "25.11-onnx-trt-agt-s1"
+    modelsTag: "0.1.6-s1"
+
   resources:
     limits:
       cpu: 2000m
-      memory: 20Gi
+      memory: 25Gi
       gpuCount: 1
       gpuResourceName: "nvidia.com/gpu"  # Can be overridden for MIG: nvidia.com/mig-3g.40gb
     requests:
@@ -194,7 +202,9 @@ scanners:
 
   sensitive:
     replicas: 1
-    env: {}
+    env:
+      CHUNK_SIZE: 256
+      CHUNK_OVERLAP_SIZE: 64
     resources:
       limits:
         cpu: 2000m
@@ -219,7 +229,9 @@ scanners:
 
   anonymize:
     replicas: 1
-    env: {}
+    env:
+      CHUNK_SIZE: 256
+      CHUNK_OVERLAP_SIZE: 64
     resources:
       limits:
         cpu: 2000m
@@ -369,16 +381,13 @@ postgresql:
     # Prefer server ciphers
     preferServerCiphers: true
 
-  # Enable volumePermissions for tls support.
-  # runAsUser 1001 matches the EFS access point uid so chown is a no-op EFS allows.
+  # Enable volumePermissions for TLS support and Azure Disk ownership setup.
   volumePermissions:
     enabled: true
     image:
       registry: docker.io
       repository: bitnamilegacy/os-shell
       tag: 12-debian-12-r50
-    securityContext:
-      runAsUser: 1001
 
   primary:
     persistence:

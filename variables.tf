@@ -39,8 +39,8 @@ variable "app_node_count" {
   default     = 1
 
   validation {
-    condition     = var.app_node_count >= 1
-    error_message = "app_node_count must be at least 1."
+    condition     = var.app_node_count >= 1 && floor(var.app_node_count) == var.app_node_count
+    error_message = "app_node_count must be a positive integer."
   }
 }
 
@@ -69,8 +69,8 @@ variable "gpu_enabled" {
 
 variable "gpu_node_vm_size" {
   # The GPU must satisfy BOTH: (1) TensorRT 10 in the Triton image needs SM 75+
-  # (Turing or newer) — rules out the V100/NCsv3; and (2) the FortiAIGate 8.0.0
-  # spec requires a supported model (NVIDIA L4/A10/A100) with >=24 GB VRAM —
+  # (Turing or newer) — rules out the V100/NCsv3; and (2) the FortiAIGate
+  # deployment spec requires a supported model (NVIDIA L4/A10/A100) with >=24 GB VRAM —
   # which rules out the 16 GB T4. On Azure that intersection is the A10
   # (NV36ads_A10_v5, 24 GB) or A100. A10 matches the A10G the EKS stack runs.
   # See docs/gpu-triton-compatibility.md.
@@ -90,7 +90,7 @@ variable "image_repository" {
   type        = string
 
   validation {
-    condition     = length(var.image_repository) > 0
+    condition     = length(trimspace(var.image_repository)) > 0
     error_message = "image_repository is required and must point at a registry containing the FortiAIGate images."
   }
 }
@@ -102,9 +102,21 @@ variable "acr_id" {
 }
 
 variable "image_tag" {
-  description = "Image tag for all FortiAIGate service images"
+  description = "Image tag for FortiAIGate application services (api, core, webui, logd, license_manager, scanner); Triton and its model image use separate tags."
   type        = string
-  default     = "V8.0.0-build0024"
+  default     = "V8.0.1-build0031"
+}
+
+variable "triton_image_tag" {
+  description = "Tag for the custom-triton inference server image when GPU is enabled. Must match the image pushed to the registry."
+  type        = string
+  default     = "25.11-onnx-trt-agt-s1"
+}
+
+variable "triton_models_image_tag" {
+  description = "Tag for the triton-models image when GPU is enabled. Must match the image pushed to the registry."
+  type        = string
+  default     = "0.1.6-s1"
 }
 
 variable "namespace" {

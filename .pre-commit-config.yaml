@@ -20,6 +20,6 @@ repos:
       - id: check-merge-conflict
       - id: check-yaml
         args: ["--allow-multiple-documents"]
-        exclude: ^fortiaigate/templates/
+        exclude: ^(fortiaigate|certmanager-issuer)/templates/
       - id: check-added-large-files
         args: ["--maxkb=500"]

@@ -41,6 +41,16 @@ resource "azurerm_storage_account" "fortiaigate" {
   tags = {
     Name = var.cluster_name
   }
+
+  lifecycle {
+    precondition {
+      condition = (
+        (var.storage_account_tier == "Premium" && var.storage_account_kind == "FileStorage") ||
+        (var.storage_account_tier == "Standard" && var.storage_account_kind == "StorageV2")
+      )
+      error_message = "Azure Files requires Premium/FileStorage or Standard/StorageV2."
+    }
+  }
 }
 
 # Azure File CSI splits work across TWO AKS identities, and both need a grant:
@@ -87,7 +97,7 @@ resource "kubernetes_storage_class" "azurefile" {
   allow_volume_expansion = true
 
   parameters = {
-    skuName        = "Premium_LRS"
+    skuName        = "${var.storage_account_tier}_LRS"
     storageAccount = azurerm_storage_account.fortiaigate.name
     resourceGroup  = azurerm_resource_group.this.name
     # Use SMB protocol (default). For NFSv4.1, set protocol = "nfs" and ensure
