@@ -20,6 +20,9 @@ locals {
   )))
 
   license_cm_name = length(kubernetes_config_map.licenses) > 0 ? "fortiaigate-license-config" : ""
+  license_checksum = length(var.licenses) > 0 ? sha256(jsonencode({
+    for node_name, license_path in var.licenses : node_name => filesha256(license_path)
+  })) : ""
 
   # Pass node names into global.licenses so the Helm affinity blocks can use them.
   # Values are empty strings — the actual license content lives in the ConfigMap created
@@ -86,6 +89,18 @@ locals {
     }
   })]
 
+  # Point the bundled PostgreSQL at the Terraform-owned credential Secret below
+  # instead of letting Bitnami generate a random one. The Secret keeps the
+  # chart's default name, so api/core/logd (which reference
+  # <release>-postgresql / key "password") need no template changes.
+  db_auth_values = [yamlencode({
+    postgresql = {
+      auth = {
+        existingSecret = kubernetes_secret.postgresql.metadata[0].name
+      }
+    }
+  })]
+
   # Ingress annotations — yamlencode handles keys with dots and slashes correctly,
   # which the set{} name path syntax cannot express.
   ingress_annotation_values = [yamlencode({
@@ -111,6 +126,19 @@ locals {
     }
   })] : []
 
+  # Internal mode + self-signed TLS: tell AGIC to validate the HTTPS backends
+  # against the per-deployment CA that appgw.tf uploads as a trusted root.
+  # Without it the gateway can't trust the backend cert and returns 502. Public
+  # mode's add-on gateway isn't Terraform-managed, so the CA isn't uploaded there;
+  # Let's Encrypt chains to a well-known CA and needs nothing.
+  appgw_trusted_root_values = (local.appgw_byo && !var.letsencrypt_enabled) ? [yamlencode({
+    ingress = {
+      annotations = {
+        "appgw.ingress.kubernetes.io/appgw-trusted-root-certificate" = local.appgw_trusted_root_name
+      }
+    }
+  })] : []
+
   # The chart mounts fortiaigate-tls-secret by name (tls.existingSecret). Who
   # owns it depends on the mode:
   #   - self-signed (default): Terraform's kubernetes_secret.tls owns it, and the
@@ -120,7 +148,7 @@ locals {
   #     instead -- flipping staging->production rolls the pods to pick up the new
   #     cert. The name is the well-known secret cert-manager writes to.
   tls_secret_name     = var.letsencrypt_enabled ? "fortiaigate-tls-secret" : kubernetes_secret.tls[0].metadata[0].name
-  tls_secret_checksum = var.letsencrypt_enabled ? "letsencrypt-${var.letsencrypt_environment}" : sha256(tls_self_signed_cert.fortiaigate[0].cert_pem)
+  tls_secret_checksum = var.letsencrypt_enabled ? "letsencrypt-${var.letsencrypt_environment}" : sha256(tls_locally_signed_cert.fortiaigate[0].cert_pem)
   tls_values = [yamlencode({
     tls = {
       enabled                = true
@@ -175,6 +203,63 @@ locals {
     postgresql = { tls = { enabled = false } }
     redis      = { tls = { enabled = false } }
   })] : []
+}
+
+# PostgreSQL credentials, owned by Terraform rather than the Helm release.
+#
+# PostgreSQL stores the role passwords inside its data directory at initdb and
+# never re-reads them from the Secret. The data lives on a StatefulSet PVC that
+# survives `helm uninstall`, but a chart-generated Secret does not — so any
+# uninstall/reinstall (e.g. clearing a stuck pending-install) used to mint a new
+# random password that no longer matched the retained database, and api/core/logd
+# crashlooped on "password authentication failed". Owning the Secret here ties
+# the password's lifetime to Terraform state instead of the Helm release.
+#
+# ignore_changes = all: a password is only ever set at initdb, so a regenerated
+# value would silently break an existing database. Never let a config tweak (or
+# the attribute defaults set by `terraform import`) replace these. Rotating the
+# password requires ALTER ROLE inside PostgreSQL as well — see docs.
+resource "random_password" "postgresql_user" {
+  length  = 32
+  special = false
+
+  lifecycle {
+    ignore_changes = all
+  }
+}
+
+resource "random_password" "postgresql_admin" {
+  length  = 32
+  special = false
+
+  lifecycle {
+    ignore_changes = all
+  }
+}
+
+resource "kubernetes_secret" "postgresql" {
+  metadata {
+    name      = "fortiaigate-postgresql"
+    namespace = kubernetes_namespace.fortiaigate.metadata[0].name
+
+    annotations = {
+      # Deployments created before this Secret moved to Terraform have it in the
+      # Helm release manifest. On the upgrade that sets existingSecret, Helm
+      # deletes resources that left the manifest unless the LIVE object carries
+      # this policy — so it must stay set (Terraform applies it before the
+      # helm_release upgrade, which references this resource).
+      "helm.sh/resource-policy" = "keep"
+    }
+  }
+
+  type = "Opaque"
+
+  # Key names are the Bitnami chart defaults (auth.secretKeys.userPasswordKey /
+  # adminPasswordKey) and what the fortiaigate templates read.
+  data = {
+    "password"          = random_password.postgresql_user.result
+    "postgres-password" = random_password.postgresql_admin.result
+  }
 }
 
 resource "helm_release" "nvidia_device_plugin" {
@@ -249,6 +334,10 @@ resource "helm_release" "fortiaigate" {
       error_message = "ingress_class is azure-application-gateway, but agic_enabled is false. Select an installed ingress controller or enable AGIC."
     }
     precondition {
+      condition     = !var.internal || (var.agic_enabled && var.ingress_class == "azure-application-gateway")
+      error_message = "internal = true is implemented through AGIC's private frontend (appgw.tf) and requires agic_enabled = true with ingress_class = \"azure-application-gateway\". For another controller, configure its internal load balancer directly."
+    }
+    precondition {
       condition = !var.gpu_enabled || length([
         for node_name in keys(var.licenses) : node_name
         if can(regex("^aks-gpu-", node_name))
@@ -261,6 +350,8 @@ resource "helm_release" "fortiaigate" {
     kubernetes_storage_class.azurefile,
     kubernetes_config_map.licenses,
     kubernetes_secret.tls,
+    # The trusted root must exist on the gateway before AGIC reads the annotation.
+    azurerm_application_gateway.this,
     # In Let's Encrypt mode this owns fortiaigate-tls-secret instead; both are
     # counted resources, so whichever is inactive is simply an empty dependency.
     helm_release.cert_manager_issuer,
@@ -271,6 +362,10 @@ resource "helm_release" "fortiaigate" {
     helm_release.reloader,
     azurerm_role_assignment.kubelet_acr_pull,
     azurerm_role_assignment.agic_appgw_subnet_network_contributor,
+    # Internal mode only (zero resources otherwise): AGIC's rights on the
+    # Terraform-managed gateway.
+    azurerm_role_assignment.agic_appgw_contributor,
+    azurerm_role_assignment.agic_rg_reader,
   ]
 
   # Values are merged left-to-right; later entries take precedence. Terraform's
@@ -280,7 +375,9 @@ resource "helm_release" "fortiaigate" {
     [for f in var.extra_values_files : file(f)],
     local.gpu_values,
     local.db_storage_values,
+    local.db_auth_values,
     local.internal_appgw_values,
+    local.appgw_trusted_root_values,
     local.ingress_annotation_values,
     local.tls_values,
     local.db_tls_values,
@@ -334,5 +431,13 @@ resource "helm_release" "fortiaigate" {
   set {
     name  = "license.existingConfigMap"
     value = local.license_cm_name
+  }
+  # Roll license-manager when a license file's CONTENT changes (e.g. swapping a
+  # license that is "In Use" elsewhere for a free one under the same node name).
+  # Only the ConfigMap changes in that case, which Kubernetes does not propagate
+  # to running pods on its own.
+  set {
+    name  = "license.checksum"
+    value = local.license_checksum
   }
 }

@@ -33,6 +33,16 @@ output "ingress_host" {
   value       = var.ingress_host
 }
 
+output "tls_ca_certificate" {
+  description = "PEM of the per-deployment CA that signs the self-signed serving cert (empty with Let's Encrypt). Import it into clients' trust stores to remove the browser warning; it is regenerated on every rebuild. Public certificate, not a secret."
+  value       = var.letsencrypt_enabled ? "" : tls_self_signed_cert.ca[0].cert_pem
+}
+
+output "appgw_private_ip" {
+  description = "Private frontend IP of the Application Gateway when internal = true (point internal DNS for ingress_host here); null in public mode"
+  value       = local.appgw_byo ? local.appgw_private_ip : null
+}
+
 data "kubernetes_ingress_v1" "fortiaigate" {
   metadata {
     name      = "fortiaigate-ingress"

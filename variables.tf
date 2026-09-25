@@ -23,7 +23,12 @@ variable "kubernetes_version" {
 }
 
 variable "app_node_vm_size" {
-  description = "Azure VM size for the application node pool"
+  # Node-keyed licensing puts every app pod on the licensed app node(s); the
+  # build0031 service set requests ~12 vCPU / ~24 GiB, so a 16-vCPU size is the
+  # practical floor for a single app node. Set before the first deploy:
+  # resizing the default pool in place needs azurerm's temporary_name_for_rotation
+  # (not set here), and a resized node gets a new name -> re-key var.licenses.
+  description = "Azure VM size for the application node pool. With one licensed app node all app pods run on it (~12 vCPU / ~24 GiB requested), so 16 vCPU (Standard_D16s_v5) is the practical minimum."
   type        = string
   default     = "Standard_D16s_v5"
 }
@@ -248,9 +253,15 @@ variable "extra_values_files" {
 }
 
 variable "internal" {
-  description = "Deploy as an internal (private) service. Adds AGIC's private-IP annotation; the Application Gateway must also have a private frontend IP. For public DNS, keep false."
+  description = "Expose the UI only on a private IP inside the VNet. When true (requires agic_enabled), Terraform creates the Application Gateway itself with a static private frontend (appgw.tf), points the AGIC add-on at it, and annotates the Ingress so every listener binds to the private IP. When false, the add-on creates a public-only gateway. Choose at deploy time; see docs/application-gateway-dns-tls.md."
   type        = bool
   default     = false
+}
+
+variable "appgw_private_ip" {
+  description = "Static private frontend IP for the Application Gateway when internal = true. Must be an unused address inside appgw_subnet_cidr. Empty = second-to-last address of the subnet (e.g. 10.0.64.254 for 10.0.64.0/24), per Microsoft's guidance to allocate gateway frontends from the top of the subnet."
+  type        = string
+  default     = ""
 }
 
 # ----------------------------------------------------------------------------

@@ -46,14 +46,17 @@ resource "azurerm_kubernetes_cluster" "this" {
     dns_service_ip = "10.1.0.10"
   }
 
-  # AGIC addon — AKS creates and manages the Application Gateway in the
-  # appgw subnet. Toggle off to manage ingress externally (ingress-nginx,
-  # web_app_routing addon, BYO controller).
+  # AGIC addon. Public mode (internal = false): AKS creates and manages the
+  # Application Gateway in the appgw subnet (public frontend only). Internal
+  # mode: the add-on is pointed at the Terraform-managed gateway in appgw.tf,
+  # which also has a private frontend. Toggle agic_enabled off to manage
+  # ingress externally (ingress-nginx, web_app_routing addon, BYO controller).
   dynamic "ingress_application_gateway" {
     for_each = var.agic_enabled ? [1] : []
     content {
-      gateway_name = "${var.cluster_name}-appgw"
-      subnet_id    = azurerm_subnet.appgw.id
+      gateway_id   = local.appgw_byo ? azurerm_application_gateway.this[0].id : null
+      gateway_name = local.appgw_byo ? null : "${var.cluster_name}-appgw"
+      subnet_id    = local.appgw_byo ? null : azurerm_subnet.appgw.id
     }
   }
 

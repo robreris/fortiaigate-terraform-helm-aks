@@ -41,6 +41,14 @@ triton_models_image_tag = "0.1.6-s1"
 app_node_count = 1
 # app_node_max_pods = 110
 
+# App node VM size. With one licensed app node, EVERY app pod lands on it: the
+# build0031 service set requests ~12 vCPU / ~24 GiB, so 16 vCPU (D16s_v5, 64 GiB)
+# is the practical minimum — an 8-vCPU size leaves pods Pending. Size up (e.g.
+# Standard_D32s_v5) for headroom. Set it BEFORE the first deploy: resizing the
+# default pool on a live cluster needs azurerm's temporary_name_for_rotation
+# (not set here), and any resize yields a new node name to re-key in `licenses`.
+app_node_vm_size = "Standard_D16s_v5"
+
 # ---------------------------------------------------------------------------
 # GPU support
 # ---------------------------------------------------------------------------
@@ -59,13 +67,17 @@ gpu_node_vm_size = "Standard_NV36ads_A10_v5"
 # Ingress (Application Gateway Ingress Controller)
 # ---------------------------------------------------------------------------
 # Public UI path: keep internal=false, set ingress_host, then create an Azure
-# DNS (or external DNS) A record to the Application Gateway public IP. See
-# docs/application-gateway-dns-tls.md.
+# DNS (or external DNS) A record to the Application Gateway public IP.
+# Internal-only path: set internal=true BEFORE the first deploy. Terraform then
+# creates the Application Gateway with a static private frontend and binds all
+# listeners to it; point internal DNS for ingress_host at
+# `terraform output appgw_private_ip`. See docs/application-gateway-dns-tls.md.
 
 agic_enabled  = true
 ingress_class = "azure-application-gateway"
 internal      = false
 ingress_host  = "fortiaigate.example.com"
+# appgw_private_ip = "10.0.64.254"  # internal=true only; default = second-to-last address of appgw_subnet_cidr
 
 # AGIC annotations. Terraform supplies backend-protocol=https and ssl-redirect
 # defaults; explicit annotations here override them:

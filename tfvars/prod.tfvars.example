@@ -19,6 +19,14 @@ triton_models_image_tag = "0.1.6-s1"
 # (default 110) lets the full service set fit per node.
 app_node_count = 3
 
+# App node VM size. With one licensed app node, EVERY app pod lands on it: the
+# build0031 service set requests ~12 vCPU / ~24 GiB, so 16 vCPU (D16s_v5, 64 GiB)
+# is the practical minimum — an 8-vCPU size leaves pods Pending. Size up (e.g.
+# Standard_D32s_v5) for headroom. Set it BEFORE the first deploy: resizing the
+# default pool on a live cluster needs azurerm's temporary_name_for_rotation
+# (not set here), and any resize yields a new node name to re-key in `licenses`.
+app_node_vm_size = "Standard_D16s_v5"
+
 gpu_enabled = true
 # A10 (24 GB, SM 86) — Fortinet-supported with the right VRAM/compute; the older
 # V100 fails TensorRT 10. A10/A100 quota defaults to 0 — request it first.
@@ -27,8 +35,9 @@ gpu_node_vm_size = "Standard_NV36ads_A10_v5"
 
 agic_enabled  = true
 ingress_class = "azure-application-gateway"
-internal      = false
+internal      = false # true = private frontend only (Terraform-managed gateway); decide before first deploy
 ingress_host  = "fortiaigate.example.com"
+# appgw_private_ip = "10.0.64.254"  # internal=true only
 
 # Public UI path: create an Azure DNS (or external DNS) A record for
 # ingress_host that points to the Application Gateway public IP. Use a trusted

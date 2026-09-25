@@ -21,6 +21,9 @@ spec:
     metadata:
       annotations:
         checksum/tls: {{ include "fortiaigate.tlsChecksum" . | quote }}
+        {{- with .Values.license.checksum }}
+        checksum/license: {{ . | quote }}
+        {{- end }}
       labels:
         app: license-manager
         component: license-manager
@@ -144,7 +147,7 @@ spec:
       {{- end }}
       - name: license
         configMap:
-          name: {{ include "fortiaigate.fullname" . }}-license-config
+          name: {{ .Values.license.existingConfigMap | default (printf "%s-license-config" (include "fortiaigate.fullname" .)) }}
       {{- with .Values.fortiaigate.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

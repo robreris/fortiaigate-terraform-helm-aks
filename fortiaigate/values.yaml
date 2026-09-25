@@ -269,6 +269,11 @@ scanners:
 # global.licenses instead.
 license:
   existingConfigMap: ""
+  # Digest of the license contents. The ConfigMap is not part of the pod spec, so
+  # changing a license file would otherwise leave license-manager running on the
+  # old one; a new value here rolls the DaemonSet. Terraform sets it from
+  # var.licenses. Empty = no annotation (standalone/EKS renders are unchanged).
+  checksum: ""
 
 license_manager:
   placement:

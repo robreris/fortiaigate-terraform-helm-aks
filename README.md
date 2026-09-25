@@ -17,7 +17,7 @@ patches. The default application and Triton image tags match build0031.
   - An `app` node pool (default 1x `Standard_D16s_v5`, `max_pods` raised to 110) for FortiAIGate core services and the Bitnami PostgreSQL/Redis subcharts. Sized to the number of app-node licenses — node-keyed licensing pins all pods to licensed nodes, so the full service set runs on the one licensed node.
   - An optional `gpu` node pool (default 1x `Standard_NV36ads_A10_v5`, an A10) for Triton inference, tainted so only GPU workloads land there. The GPU must be a Fortinet-supported model with ≥24 GB VRAM and SM 75+ — see [docs/gpu-triton-compatibility.md](docs/gpu-triton-compatibility.md).
   - OIDC issuer and workload identity enabled (AKS analogue of EKS IRSA).
-  - AGIC addon (optional) — AKS provisions and manages an Application Gateway in a dedicated subnet.
+  - AGIC addon (optional) — AKS provisions and manages a public Application Gateway in a dedicated subnet, or, with `internal = true`, drives a Terraform-managed gateway whose listeners bind to a static private IP.
 - A Premium Azure Files storage account, the kubelet identity role assignments needed for dynamic file-share provisioning, and an `azurefile-fortiaigate` StorageClass.
 - The `fortiaigate` Helm release, with a self-signed TLS cert generated at apply time and (optionally) per-node licenses sourced from a ConfigMap. For public DNS and production TLS, see [docs/application-gateway-dns-tls.md](docs/application-gateway-dns-tls.md).
 
@@ -52,13 +52,17 @@ terraform apply \
   -target=azurerm_kubernetes_cluster_node_pool.gpu \
   -target=azurerm_role_assignment.agic_appgw_subnet_network_contributor \
   -target=azurerm_role_assignment.kubelet_acr_pull \
+  -target=azurerm_role_assignment.agic_appgw_contributor \
+  -target=azurerm_role_assignment.agic_rg_reader \
   -var-file=tfvars/dev.tfvars
 
 # (the gpu pool, AGIC subnet grant, and AcrPull grant are count-gated on
-#  gpu_enabled, agic_enabled, and acr_id respectively — each resolves to zero
-#  resources when its toggle is off, so they're safe to leave in. The AGIC
-#  grant goes in step 1 because the addon starts creating the Application
-#  Gateway as soon as the cluster exists and needs join rights on the subnet.)
+#  gpu_enabled, agic_enabled, and acr_id respectively; the two AGIC gateway
+#  grants exist only when internal = true — each resolves to zero resources
+#  when its toggle is off, so they're safe to leave in. The AGIC grants go in
+#  step 1 because the addon starts programming the Application Gateway as soon
+#  as the cluster exists. In internal mode the Terraform-managed gateway is
+#  pulled into step 1 automatically, since the cluster references it.)
 
 # Both node pools now exist. Discover node names and set var.licenses before
 # the full apply (see node-keyed licensing notes):
@@ -123,7 +127,8 @@ To switch subscriptions, set the AZ context (`az account set --subscription <id>
 | `db_storage_class` | `managed-csi` | Block (RWO) StorageClass for PostgreSQL/Redis — they cannot run on the shared Azure Files (SMB) class. |
 | `agic_enabled` | `true` | Disable to use ingress-nginx or web_app_routing instead. |
 | `ingress_class` | `azure-application-gateway` | Must match the installed controller. |
-| `internal` | `false` | For public access, leave false and point DNS at the Application Gateway public IP. True adds AGIC's private-IP annotation; the gateway must also have a private frontend. |
+| `internal` | `false` | False: the AGIC add-on creates a public-only gateway; point DNS at its public IP. True: Terraform creates the gateway with a static private frontend, points AGIC at it, and binds all listeners to the private IP (VNet/VPN access only). Decide before the first deploy — see `docs/application-gateway-dns-tls.md`. |
+| `appgw_private_ip` | `""` | Private frontend IP when `internal = true`. Empty = second-to-last address of `appgw_subnet_cidr` (e.g. `10.0.64.254`). |
 | `ingress_host` | `""` | Hostname for the ingress rule, e.g. `fortiaigate.example.com`. Set this before creating DNS/TLS for a public UI. |
 | `image_repository` | *(required)* | e.g. `myregistry.azurecr.io/fortiaigate`. |
 | `licenses` | `{}` | `{ "aks-app-xxxxxxxx-vmss000000" = "licenses/APP.lic", "aks-gpu-xxxxxxxx-vmss000000" = "licenses/GPU.lic" }`. Populate after step 1 with the real node names; include the GPU node when `gpu_enabled = true`. |

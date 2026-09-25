@@ -132,8 +132,12 @@ class HelmContracts(unittest.TestCase):
                              "value": "true", "effect": "NoSchedule"}],
         }
         values["global"] = {"licenses": {"aks-app-test": "", "aks-gpu-test": ""}}
-        values["license"] = {"existingConfigMap": "fortiaigate-license-config"}
+        values["license"] = {"existingConfigMap": "tf-license-config", "checksum": "lic-sha-test"}
         docs = render("fortiaigate", values)
+        lm = docs["DaemonSet", "license-manager"]["spec"]["template"]
+        self.assertEqual(lm["metadata"]["annotations"]["checksum/license"], "lic-sha-test")
+        lm_volumes = {v["name"]: v for v in lm["spec"]["volumes"]}
+        self.assertEqual(lm_volumes["license"]["configMap"]["name"], "tf-license-config")
         pod = docs["Deployment", "triton-server"]["spec"]["template"]["spec"]
         self.assertEqual(pod["initContainers"][0]["image"],
                          "registry.example/fortiaigate/triton-models:models-test-003")
