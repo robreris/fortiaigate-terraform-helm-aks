@@ -50,10 +50,15 @@ terraform apply \
   -target=azurerm_subnet.appgw \
   -target=azurerm_kubernetes_cluster.this \
   -target=azurerm_kubernetes_cluster_node_pool.gpu \
+  -target=azurerm_role_assignment.agic_appgw_subnet_network_contributor \
+  -target=azurerm_role_assignment.kubelet_acr_pull \
   -var-file=tfvars/dev.tfvars
 
-# (drop the gpu node pool target if gpu_enabled = false — it resolves to zero
-#  resources and the target is harmlessly ignored, so it's safe to leave in)
+# (the gpu pool, AGIC subnet grant, and AcrPull grant are count-gated on
+#  gpu_enabled, agic_enabled, and acr_id respectively — each resolves to zero
+#  resources when its toggle is off, so they're safe to leave in. The AGIC
+#  grant goes in step 1 because the addon starts creating the Application
+#  Gateway as soon as the cluster exists and needs join rights on the subnet.)
 
 # Both node pools now exist. Discover node names and set var.licenses before
 # the full apply (see node-keyed licensing notes):

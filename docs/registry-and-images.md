@@ -70,10 +70,22 @@ Standard is enough.
 
 ## Variables to set
 
+Sign in to Azure CLI and select the subscription where the registry will live.
+Use your service principal login instead of `az login` in a non-interactive
+environment. The registry name below uses the selected subscription ID only
+to form a deterministic suffix; `ARM_SUBSCRIPTION_ID` is not needed for this
+registry workflow.
+
+```bash
+az login
+az account set --subscription "<subscription-id>"
+```
+
 ```bash
 export LOCATION="westus"
 export ACR_RG="fortiaigate-acr"
-export ACR_NAME="fortiaigateacr$(echo $ARM_SUBSCRIPTION_ID | tr -d '-' | tail -c 9)"
+export ACR_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+export ACR_NAME="fortiaigateacr$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom | head -c 9; echo)"
 export ACR_SKU="Standard"     # or Premium
 export IMAGE_PREFIX="fortiaigate"
 export BUILD="build0031"      # supplied image archives and Helm chart

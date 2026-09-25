@@ -43,8 +43,9 @@ The user authenticates Terraform via service principal env vars: `ARM_CLIENT_ID`
 terraform init -backend-config=backends/<subscription>.hcl -reconfigure
 
 # First-time deploy MUST be two-step — see "Two-step apply" below
-terraform apply -target=azurerm_resource_group.this -target=azurerm_virtual_network.this -target=azurerm_subnet.aks -target=azurerm_subnet.appgw -target=azurerm_kubernetes_cluster.this -target=azurerm_kubernetes_cluster_node_pool.gpu -var-file=tfvars/<subscription>.tfvars
-# (the gpu pool target resolves to zero resources when gpu_enabled = false, so it's safe to leave in)
+terraform apply -target=azurerm_resource_group.this -target=azurerm_virtual_network.this -target=azurerm_subnet.aks -target=azurerm_subnet.appgw -target=azurerm_kubernetes_cluster.this -target=azurerm_kubernetes_cluster_node_pool.gpu -target=azurerm_role_assignment.agic_appgw_subnet_network_contributor -target=azurerm_role_assignment.kubelet_acr_pull -var-file=tfvars/<subscription>.tfvars
+# (gpu pool / AGIC subnet grant / AcrPull grant are count-gated on gpu_enabled / agic_enabled / acr_id and resolve to zero when off, so they're safe to leave in.
+#  The AGIC grant belongs in step 1: the addon creates the App Gateway as soon as the cluster exists and needs join rights on the appgw subnet.)
 # Both node pools now exist — discover node names and set var.licenses before the full apply.
 terraform apply -var-file=tfvars/<subscription>.tfvars
 

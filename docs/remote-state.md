@@ -19,14 +19,15 @@ uses native blob leases for state locking.
 ## Variables to choose
 
 Set these once in your shell before running the commands below. Pick a
-deterministic suffix (last 4 chars of the subscription ID is a common
-convention) — the storage account name must be globally unique and 3-24
+deterministic suffix (the example uses the last 8 characters of the
+subscription ID) — the storage account name must be globally unique and 3-24
 lowercase alphanumerics.
 
 ```bash
+export ARM_SUBSCRIPTION_ID="<subscription-id>"
 export LOCATION="eastus"
 export STATE_RG="fortiaigate-tfstate"
-export STATE_SA="fortiaigatetf$(echo $ARM_SUBSCRIPTION_ID | tr -d '-' | tail -c 9)"
+export STATE_SA="fortiaigatetf$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom | head -c 9; echo)"
 export STATE_CONTAINER="tfstate"
 ```
 
