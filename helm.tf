@@ -16,48 +16,32 @@ locals {
   chart_revision = sha256(join("", concat(
     [filesha256("${path.module}/fortiaigate/Chart.yaml"), filesha256("${path.module}/fortiaigate/values.yaml")],
     [for f in sort(fileset("${path.module}/fortiaigate", "templates/**")) : filesha256("${path.module}/fortiaigate/${f}")],
+    [for f in sort(fileset("${path.module}/fortiaigate", "files/**")) : filesha256("${path.module}/fortiaigate/${f}")],
     [for f in sort(fileset("${path.module}/fortiaigate", "charts/**")) : filesha256("${path.module}/fortiaigate/${f}")],
   )))
 
-  license_cm_name = length(kubernetes_config_map.licenses) > 0 ? "fortiaigate-license-config" : ""
-  license_checksum = length(var.licenses) > 0 ? sha256(jsonencode({
-    for node_name, license_path in var.licenses : node_name => filesha256(license_path)
-  })) : ""
-
-  # Pass node names into global.licenses so the Helm affinity blocks can use them.
-  # Values are empty strings — the actual license content lives in the ConfigMap created
-  # by licenses.tf. Node names contain dots so set{} blocks can't be used here.
-  license_node_values = length(var.licenses) > 0 ? [yamlencode({
-    global = {
-      licenses = { for node_name, _ in var.licenses : node_name => "" }
-    }
-  })] : []
-
-  # GPU placement values — only included when gpu_enabled = true.
-  # Using yamlencode avoids the set{} block limitation with YAML lists (tolerations).
-  gpu_values = var.gpu_enabled ? [yamlencode({
+  # Placement is independent of deployment licensing. GPU nodes are tainted.
+  placement_values = [yamlencode({
     fortiaigate = {
+      appWorkloadPlacement = { nodeSelector = { fortiaigate-role = "app" } }
       gpuWorkloadPlacement = {
         nodeSelector = { fortiaigate-role = "gpu" }
         tolerations = [{
-          key      = "fortiaigate-gpu"
-          operator = "Equal"
-          value    = "true"
-          effect   = "NoSchedule"
+          key = "fortiaigate-gpu", operator = "Equal", value = "true", effect = "NoSchedule"
         }]
       }
     }
-    license_manager = {
-      placement = {
-        tolerations = [{
-          key      = "fortiaigate-gpu"
-          operator = "Equal"
-          value    = "true"
-          effect   = "NoSchedule"
-        }]
-      }
-    }
-  })] : []
+    postgresql = { primary = { nodeSelector = { fortiaigate-role = "app" } } }
+    redis      = { master = { nodeSelector = { fortiaigate-role = "app" } } }
+  })]
+
+  # Terraform-owned secrets survive Helm reinstall with retained database data.
+  application_secret_values = [yamlencode({
+    api         = { masterKeyExistingSecret = kubernetes_secret.application.metadata[0].name }
+    dpAgent     = { masterKeyExistingSecret = kubernetes_secret.application.metadata[0].name }
+    fortiaigate = { env = { csrfExistingSecret = kubernetes_secret.application.metadata[0].name } }
+    redis       = { auth = { existingSecret = kubernetes_secret.redis.metadata[0].name } }
+  })]
 
   # Move PostgreSQL and Redis off the shared Azure Files (SMB) claim onto their
   # own dynamically-provisioned Azure Disk PVCs. The chart's values default both
@@ -91,7 +75,7 @@ locals {
 
   # Point the bundled PostgreSQL at the Terraform-owned credential Secret below
   # instead of letting Bitnami generate a random one. The Secret keeps the
-  # chart's default name, so api/core/logd (which reference
+  # chart's default name, so api/llm-gateway/logd (which reference
   # <release>-postgresql / key "password") need no template changes.
   db_auth_values = [yamlencode({
     postgresql = {
@@ -183,7 +167,7 @@ locals {
 # never re-reads them from the Secret. The data lives on a StatefulSet PVC that
 # survives `helm uninstall`, but a chart-generated Secret does not — so any
 # uninstall/reinstall (e.g. clearing a stuck pending-install) used to mint a new
-# random password that no longer matched the retained database, and api/core/logd
+# random password that no longer matched the retained database, and api/llm-gateway/logd
 # crashlooped on "password authentication failed". Owning the Secret here ties
 # the password's lifetime to Terraform state instead of the Helm release.
 #
@@ -269,7 +253,7 @@ resource "helm_release" "nvidia_device_plugin" {
 }
 
 # Stakater Reloader — only in Let's Encrypt mode. It watches fortiaigate-tls-secret
-# and rolls the core/api/webui Deployments (annotated by the chart when
+# and rolls the llm-gateway/api/webui Deployments (annotated by the chart when
 # tls.reloaderEnabled) whenever cert-manager rewrites the cert: the staging->prod
 # flip and silent 90-day renewals both land in the secret out-of-band from any
 # terraform apply, so the checksum-based roll alone can serve a stale cert (the
@@ -296,7 +280,7 @@ resource "helm_release" "reloader" {
 resource "helm_release" "fortiaigate" {
   name      = "fortiaigate"
   chart     = "${path.module}/fortiaigate"
-  version   = "8.0.1"
+  version   = "8.0.2"
   namespace = kubernetes_namespace.fortiaigate.metadata[0].name
   timeout   = var.helm_timeout
 
@@ -309,18 +293,12 @@ resource "helm_release" "fortiaigate" {
       condition     = !var.internal || (var.agic_enabled && var.ingress_class == "azure-application-gateway")
       error_message = "internal = true is implemented through AGIC's private frontend (appgw.tf) and requires agic_enabled = true with ingress_class = \"azure-application-gateway\". For another controller, configure its internal load balancer directly."
     }
-    precondition {
-      condition = !var.gpu_enabled || length([
-        for node_name in keys(var.licenses) : node_name
-        if can(regex("^aks-gpu-", node_name))
-      ]) > 0
-      error_message = "gpu_enabled=true requires var.licenses to include the GPU AKS node name, usually aks-gpu-... Run the targeted infrastructure apply first, then run `kubectl get nodes -o custom-columns=NAME:.metadata.name,ROLE:.metadata.labels.fortiaigate-role --no-headers` and add both app and gpu node licenses before the full apply."
-    }
   }
 
   depends_on = [
     kubernetes_storage_class.azurefile,
-    kubernetes_config_map.licenses,
+    kubernetes_secret.application,
+    kubernetes_secret.redis,
     kubernetes_secret.tls,
     kubernetes_secret.internal_tls,
     terraform_data.tls_configuration,
@@ -347,14 +325,14 @@ resource "helm_release" "fortiaigate" {
   # The set blocks below have final precedence for directly mapped variables.
   values = concat(
     [for f in var.extra_values_files : file(f)],
-    local.gpu_values,
+    local.placement_values,
+    local.application_secret_values,
     local.db_storage_values,
     local.db_auth_values,
     local.internal_appgw_values,
     local.appgw_trusted_root_values,
     local.ingress_annotation_values,
     local.tls_values,
-    local.license_node_values,
   )
 
   set {
@@ -376,6 +354,19 @@ resource "helm_release" "fortiaigate" {
   set {
     name  = "triton.image.modelsTag"
     value = var.triton_models_image_tag
+  }
+  set {
+    name  = "vllm.image.tag"
+    value = var.vllm_image_tag
+  }
+  set {
+    name  = "vllm.gpuAttach"
+    value = var.vllm_gpu_attach
+  }
+  # The supplied bundle has no dp_agent image. Keep it disabled in this port.
+  set {
+    name  = "dpAgent.enabled"
+    value = "false"
   }
   set {
     name  = "fortiaigate.gpu.enabled"
@@ -400,17 +391,5 @@ resource "helm_release" "fortiaigate" {
   set {
     name  = "storage.size"
     value = var.storage_size
-  }
-  set {
-    name  = "license.existingConfigMap"
-    value = local.license_cm_name
-  }
-  # Roll license-manager when a license file's CONTENT changes (e.g. swapping a
-  # license that is "In Use" elsewhere for a free one under the same node name).
-  # Only the ConfigMap changes in that case, which Kubernetes does not propagate
-  # to running pods on its own.
-  set {
-    name  = "license.checksum"
-    value = local.license_checksum
   }
 }

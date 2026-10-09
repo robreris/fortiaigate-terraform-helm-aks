@@ -60,14 +60,6 @@ spec:
       affinity: {{- include "common.tplvalues.render" (dict "value" .Values.primary.affinity "context" $) | nindent 8 }}
       {{- else }}
       affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      {{- keys .Values.global.licenses | toYaml | nindent 22 }}
         podAffinity: {{- include "common.affinities.pods" (dict "type" .Values.primary.podAffinityPreset "component" "primary" "customLabels" $podLabels "context" $) | nindent 10 }}
         podAntiAffinity: {{- include "common.affinities.pods" (dict "type" .Values.primary.podAntiAffinityPreset "component" "primary" "customLabels" $podLabels "context" $) | nindent 10 }}
       {{- end }}

@@ -82,6 +82,14 @@ run "generated" {
     condition     = yamldecode(local.tls_values[0]).postgresql.tls.enabled && yamldecode(local.tls_values[0]).redis.tls.enabled
     error_message = "Generated mode must enable database TLS."
   }
+  assert {
+    condition     = yamldecode(local.application_secret_values[0]).api.masterKeyExistingSecret == "fortiaigate-application" && yamldecode(local.application_secret_values[0]).redis.auth.existingSecret == "fortiaigate-redis"
+    error_message = "Application encryption/CSRF and Redis credentials must reference Terraform-owned secrets."
+  }
+  assert {
+    condition     = contains(tls_cert_request.fortiaigate[0].dns_names, "guardrail.fortiaigate.svc.cluster.local") && contains(tls_cert_request.fortiaigate[0].dns_names, "llm-gateway")
+    error_message = "Generated certificates must cover the new service names."
+  }
 }
 
 run "supplied_public" {
@@ -214,4 +222,65 @@ run "unreadable_certificate" {
     tls_private_key_path = "test-key.pem"
   }
   expect_failures = [var.tls_certificate_path]
+}
+
+run "build0047_shared_gpu" {
+  command = apply
+  variables {
+    gpu_enabled    = true
+    gpu_node_count = 1
+  }
+  assert {
+    condition     = helm_release.fortiaigate.version == "8.0.2" && var.image_tag == "V8.0.2-build0047"
+    error_message = "Fresh installations must use the build0047 chart/image set."
+  }
+  assert {
+    condition     = azurerm_kubernetes_cluster_node_pool.gpu[0].min_count == 1 && azurerm_kubernetes_cluster_node_pool.gpu[0].gpu_driver == "Install"
+    error_message = "GPU capacity and explicit AKS driver configuration must be preserved."
+  }
+  assert {
+    condition     = one([for item in helm_release.fortiaigate.set : item.value if item.name == "vllm.gpuAttach"]) == "shared" && one([for item in helm_release.fortiaigate.set : item.value if item.name == "dpAgent.enabled"]) == "false"
+    error_message = "Shared GPU must be explicit and the unsupplied DP agent must stay disabled."
+  }
+  assert {
+    condition     = yamldecode(helm_release.fortiaigate.values[0]).fortiaigate.gpuWorkloadPlacement.nodeSelector["fortiaigate-role"] == "gpu" && yamldecode(helm_release.fortiaigate.values[0]).postgresql.primary.nodeSelector["fortiaigate-role"] == "app"
+    error_message = "Terraform must pass GPU and database placement into the release values."
+  }
+}
+
+run "build0047_dedicated_gpu" {
+  command = apply
+  variables {
+    gpu_enabled     = true
+    gpu_node_count  = 2
+    vllm_gpu_attach = "dedicated"
+  }
+  assert {
+    condition     = azurerm_kubernetes_cluster_node_pool.gpu[0].min_count == 2 && azurerm_kubernetes_cluster_node_pool.gpu[0].max_count == 2 && one([for item in helm_release.fortiaigate.set : item.value if item.name == "vllm.gpuAttach"]) == "dedicated"
+    error_message = "Dedicated mode must configure the requested GPU pool capacity and chart topology."
+  }
+}
+
+run "obsolete_node_license" {
+  command = plan
+  variables {
+    licenses = { "aks-app-old-node" = "missing-license.lic" }
+  }
+  expect_failures = [var.licenses]
+}
+
+run "invalid_gpu_count" {
+  command = plan
+  variables {
+    gpu_node_count = 0
+  }
+  expect_failures = [var.gpu_node_count]
+}
+
+run "invalid_gpu_topology" {
+  command = plan
+  variables {
+    vllm_gpu_attach = "auto"
+  }
+  expect_failures = [var.vllm_gpu_attach]
 }

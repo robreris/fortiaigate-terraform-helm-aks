@@ -15,7 +15,7 @@ Terraform owns `random_password.postgresql_user`,
 PostgreSQL stores passwords in its data directory at initialization. Its data
 PVC can survive a Helm uninstall, while a chart-generated Secret may disappear.
 Reinstalling with newly generated passwords against retained data causes
-`password authentication failed` in API, core, and logd. Terraform ownership
+`password authentication failed` in API, LLM gateway, and logd. Terraform ownership
 keeps the credential lifetime independent of the Helm release.
 
 The password resources use `ignore_changes = all`. Rotating a password requires
@@ -42,33 +42,39 @@ Secret. The credential-adoption plan should preserve both passwords and show
 only the expected Secret metadata and Helm release updates. Investigate any
 password replacement or unexpected pod rollout before applying.
 
-## Node-keyed licensing
+## Deployment licensing
 
-`var.licenses` maps actual AKS node names to local license files. `licenses.tf`
-loads them into `fortiaigate-license-config`. The license-manager DaemonSet
-delivers each node's license, and workload pods use required hostname affinity
-to licensed nodes. Triton also requires the GPU node selector and toleration.
+Build0047 uses a deployment license stored in PostgreSQL. Upload it through the
+authenticated `POST /api/v1/admin/licenses` endpoint using the release's request
+format. The chart deploys two license-manager replicas with preferred
+anti-affinity; both may run on a single app node. No node-name/license-file map,
+license ConfigMap, or license-manager DaemonSet is needed. The legacy Terraform
+`licenses` variable rejects nonempty maps so old inputs cannot be silently ignored.
 
-Discover both app and GPU node names between the two bootstrap applies and
-include their licenses before the full apply. Adding unlicensed nodes does not
-increase usable workload capacity. Size `app_node_count` to the app-node license
-count, and ensure the licensed nodes have enough CPU, memory, and pod capacity.
-The default `app_node_max_pods` is 110; an exhausted pod cap or hostname mismatch
-can leave workloads Pending. Inspect scheduling events and node allocation.
+App services and databases select the AKS app pool. Triton/vLLM select the
+GPU pool and tolerate its taint. Node replacement no longer requires re-keying
+hostname licenses. Size pools for workload capacity and check deployment license
+coverage against the actual GPU inventory after onboarding and changes.
 
-Node-pool replacement, repair, or upgrades can change hostnames. After pool
-churn, compare `kubectl get nodes` with `var.licenses`, obtain matching licenses
-as needed, and reapply. See [GPU compatibility](gpu-triton-compatibility.md) for
-GPU sizing and pool replacement.
+Upgrades from node-keyed licensing require separately qualified conversion;
+see [the build0047 audit](build0047-compatibility.md#existing-deployment-upgrades-remain-a-separate-milestone).
 
-A license can remain in `License status: In Use` after the prior deployment's
-nodes are removed. Core returns readiness HTTP 503 while the license is
-unavailable, so Helm and Terraform may time out despite healthy infrastructure.
-Previous deployments observed release within roughly 24 hours; verify the seat
-status in FortiFlex/FortiCare and release it manually there if necessary.
+## Application encryption, CSRF, and Redis secrets
 
-Changing license file contents updates `license.checksum` and rolls
-license-manager. Editing its ConfigMap alone does not trigger that rollout.
+Terraform creates `fortiaigate-application` with `master-key` and
+`csrf-secret-key`, plus `fortiaigate-redis` with `redis-password`. Their
+`random_password` resources ignore configuration drift to avoid replacing keys
+against retained data. API, LLM gateway, and guardrail share the encryption key;
+the optional DP agent uses the same Secret when enabled outside this Terraform
+port. Helm receives Secret names, not their contents.
+
+Back up the encryption key with PostgreSQL. Losing it can make encrypted
+credentials and response-vault data unreadable. Retain Terraform state and these
+Secrets across a Helm uninstall/reinstall. Creating a fresh Terraform state
+against old application data is not a supported restore procedure. Existing
+Redis/chart keys must be adopted through a qualified migration rather than
+replaced with new values. Do not rotate the master key without an application
+migration procedure.
 
 ## Storage and immutable settings
 
@@ -99,24 +105,23 @@ uses `Retain`, but destroying the account still removes its shares; see
 
 ## Helm value precedence and rollouts
 
-`helm.tf` merges extra values files first, then generated GPU, database storage,
-database authentication, private gateway, gateway trusted root, ingress
-annotation, TLS, and license placement values. Later entries take precedence;
+`helm.tf` merges extra values files first, then app/GPU placement, application
+secret references, database storage/authentication, private gateway, gateway
+trusted root, ingress annotations, and TLS. Later entries take precedence;
 Terraform `set` blocks override the merged values. Check the actual `values =
 concat(...)` and `set` blocks when adding overrides.
 
 `deployment.chartRevision` is a chart digest that forces Helm to notice local
 chart edits; templates do not use it to restart pods. Pod rollouts follow pod
-spec changes or checksums for web TLS, internal TLS, and licenses. Web
-certificate replacement rolls core/API/webui without rolling databases,
-scanners, logd, or license-manager. Let's Encrypt renewals use Reloader.
+spec changes or checksums for web TLS, internal TLS, and model configuration.
+Web certificate replacement rolls LLM gateway/API/webui without rolling databases,
+guardrail services, logd, or license-manager. Let's Encrypt renewals use Reloader.
 See [supplied TLS upgrade notes](tls-supplied.md#renewal-and-upgrades) for the
 separate internal Secret and the database TLS transition.
 
 Keep `gpu_driver = "Install"` explicit in `aks.tf`. Omitting it has previously
-caused a provider plan to replace the GPU pool, changing its hostname and
-breaking license placement. Investigate unexpected node-pool replacement on
-every upgrade plan.
+caused a provider plan to replace the GPU pool, disrupting model availability.
+Investigate unexpected node-pool replacement on every upgrade plan.
 
 ## Recovering a partial bootstrap
 

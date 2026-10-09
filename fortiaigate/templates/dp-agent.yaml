@@ -1,0 +1,195 @@
+{{- if .Values.dpAgent.enabled }}
+# DP Agent — data-plane management interface & single writer of management
+# state (design §1). Stateless Deployment, ≥2 replicas, NO leader election for
+# DataService (design §6). Flag-gated: dpAgent.enabled=false by default, so
+# adding this chart is a no-op until the API is cut over to route through it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dp-agent
+  labels:
+    app: dp-agent
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+spec:
+  replicas: {{ .Values.dpAgent.replicas }}
+  strategy:
+    type: {{ .Values.fortiaigate.updateStrategy }}
+  selector:
+    matchLabels:
+      app: dp-agent
+  template:
+    metadata:
+      annotations:
+        checksum/tls: {{ include "fortiaigate.internalTlsChecksum" . | quote }}
+      labels:
+        app: dp-agent
+    spec:
+      {{- include "fortiaigate.appPlacement" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: dp-agent
+        # Image repo uses the underscore module name (dp_agent), matching the
+        # build convention (as license_manager does). K8s resource names stay
+        # hyphenated (dp-agent). push_image.sh derives ${MODULE_UPPER}_TAG from
+        # the module name, so a hyphen there would be an invalid shell var.
+        image: {{ .Values.fortiaigate.image.repository }}/dp_agent:{{ .Values.fortiaigate.image.tag }}
+        imagePullPolicy: {{ .Values.fortiaigate.image.pullPolicy }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - containerPort: 9090
+          name: grpc
+          protocol: TCP
+        - containerPort: 9091
+          name: status
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: status
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: status
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.dpAgent.resources | nindent 10 }}
+        env:
+        {{- if and .Values.tls.internalExistingSecret (or .Values.tls.enabled .Values.redis.tls.enabled .Values.postgresql.tls.enabled) }}
+        - name: SSL_CERT_FILE
+          value: {{ printf "%s/%s" (include "fortiaigate.dbTlsMountPath" .) (include "fortiaigate.dbTlsCAFile" .) | quote }}
+        {{- end }}
+        - name: DP_AGENT_GRPC_ADDR
+          value: ":9090"
+        - name: DP_AGENT_STATUS_ADDR
+          value: ":9091"
+        - name: FORTIAIGATE_LOG_LEVEL
+          value: {{ .Values.fortiaigate.env.logLevel | quote }}
+        # Whether this deployment runs schema migrations at startup (goose is
+        # advisory-locked in go-common, so it is safe across replicas).
+        - name: DP_AGENT_RUN_MIGRATIONS
+          value: {{ .Values.dpAgent.runMigrations | quote }}
+        # Master key sealing credential secrets at rest (design §4 write-only
+        # secrets; go-common/secret). Resolved via fortiaigate.masterKeySecretName
+        # so this agrees with api and llm-gateway on the same key — see
+        # _helpers.tpl and master-key-secret.yaml.
+        - name: FAIG_MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fortiaigate.masterKeySecretName" . }}
+              key: master-key
+        - name: POSTGRES_SSLMODE
+          value: {{ .Values.dpAgent.postgresSslMode | quote }}
+        # Transport TLS to the datastores — same env names and cert mount as
+        # every other service (see logd.yaml).
+        - name: REDIS_SSL_ENABLED
+          value: {{ .Values.redis.tls.enabled | quote }}
+        {{- if .Values.redis.tls.enabled }}
+        - name: REDIS_SSL_CERTFILE
+          value: {{ printf "%s/tls.crt" (include "fortiaigate.dbTlsMountPath" .) | quote }}
+        - name: REDIS_SSL_KEYFILE
+          value: {{ printf "%s/tls.key" (include "fortiaigate.dbTlsMountPath" .) | quote }}
+        - name: REDIS_SSL_CA_CERTS
+          value: {{ printf "%s/%s" (include "fortiaigate.dbTlsMountPath" .) (include "fortiaigate.dbTlsCAFile" .) | quote }}
+        {{- end }}
+        - name: POSTGRES_SSL_ENABLED
+          value: {{ .Values.postgresql.tls.enabled | quote }}
+        {{- if .Values.postgresql.tls.enabled }}
+        - name: POSTGRES_SSL_CERTFILE
+          value: {{ printf "%s/tls.crt" (include "fortiaigate.dbTlsMountPath" .) | quote }}
+        - name: POSTGRES_SSL_KEYFILE
+          value: {{ printf "%s/tls.key" (include "fortiaigate.dbTlsMountPath" .) | quote }}
+        - name: POSTGRES_SSL_CA_CERTS
+          value: {{ printf "%s/%s" (include "fortiaigate.dbTlsMountPath" .) (include "fortiaigate.dbTlsCAFile" .) | quote }}
+        {{- end }}
+        # --- Step 5 (ControlTunnel): dark by default (design §3.2/§9 #10) ---
+        - name: CONTROLLER_ENABLED
+          value: {{ .Values.dpAgent.controller.enabled | quote }}
+        - name: MANAGEMENT_MODE
+          value: {{ .Values.dpAgent.managementMode | quote }}
+        - name: LOG_DETAIL_EXPORT
+          value: {{ .Values.dpAgent.logDetailExport | quote }}
+        # Redis (dual-cache invalidation).
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "fortiaigate.fullname" . }}-db-config
+              key: REDIS_HOST
+        - name: REDIS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "fortiaigate.fullname" . }}-db-config
+              key: REDIS_PORT
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-redis
+              key: redis-password
+        # Database credentials (auto-generated PostgreSQL secret + values).
+        - name: POSTGRES_USER
+          value: "{{ .Values.postgresql.auth.username }}"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-postgresql
+              key: password
+        - name: POSTGRES_DB
+          value: "{{ .Values.postgresql.auth.database }}"
+        - name: POSTGRES_HOST
+          value: "{{ .Release.Name }}-postgresql"
+        - name: POSTGRES_PORT
+          value: "{{ .Values.postgresql.primary.service.port }}"
+        {{- if or .Values.tls.enabled .Values.redis.tls.enabled .Values.postgresql.tls.enabled }}
+        volumeMounts:
+        {{- include "fortiaigate.dbTlsVolumeMount" . | nindent 8 }}
+        - name: tls-certs
+          mountPath: {{ .Values.tls.mountPath | quote }}
+          readOnly: true
+        {{- end }}
+      {{- if or .Values.tls.enabled .Values.redis.tls.enabled .Values.postgresql.tls.enabled }}
+      volumes:
+      {{- include "fortiaigate.dbTlsVolume" . | nindent 6 }}
+      - name: tls-certs
+        secret:
+          secretName: {{ include "fortiaigate.internalTlsSecretName" . }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dp-agent
+  labels:
+    app: dp-agent
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+spec:
+  # ClusterIP only — DataService is NEVER internet-facing (design §6): not on
+  # any ingress/LB. NetworkPolicy (separate) restricts callers to the API.
+  type: ClusterIP
+  selector:
+    app: dp-agent
+  ports:
+  - name: grpc
+    port: 9090
+    targetPort: grpc
+    protocol: TCP
+  - name: status
+    port: 9091
+    targetPort: status
+    protocol: TCP
+{{- end }}

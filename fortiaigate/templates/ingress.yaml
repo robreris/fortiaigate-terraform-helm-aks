@@ -1,27 +1,3 @@
-{{- $className := .Values.ingress.className }}
-{{- $defaultAnnotations := dict }}
-{{- if eq $className "alb" }}
-{{- $_ := set $defaultAnnotations "kubernetes.io/ingress.class" "alb" }}
-{{- $_ := set $defaultAnnotations "alb.ingress.kubernetes.io/scheme" "internet-facing" }}
-{{- $_ := set $defaultAnnotations "alb.ingress.kubernetes.io/target-type" "ip" }}
-{{- if .Values.tls.enabled }}
-{{- $_ := set $defaultAnnotations "alb.ingress.kubernetes.io/backend-protocol" "HTTPS" }}
-{{- $_ := set $defaultAnnotations "alb.ingress.kubernetes.io/healthcheck-protocol" "HTTPS" }}
-{{- end }}
-{{- else if eq $className "nginx" }}
-{{- if .Values.tls.enabled }}
-{{- $_ := set $defaultAnnotations "nginx.ingress.kubernetes.io/backend-protocol" "HTTPS" }}
-{{- $_ := set $defaultAnnotations "nginx.ingress.kubernetes.io/healthcheck-protocol" "HTTPS" }}
-{{- $_ := set $defaultAnnotations "nginx.ingress.kubernetes.io/ssl-redirect" "true" }}
-{{- $_ := set $defaultAnnotations "nginx.ingress.kubernetes.io/force-ssl-redirect" "false" }}
-{{- end }}
-{{- else if eq $className "traefik" }}
-{{- if .Values.tls.enabled }}
-{{- $_ := set $defaultAnnotations "traefik.ingress.kubernetes.io/router.entrypoints" "websecure" }}
-{{- $_ := set $defaultAnnotations "traefik.ingress.kubernetes.io/router.middlewares" "default-redirect-https@kubernetescrd" }}
-{{- end }}
-{{- end }}
-{{- $annotations := mergeOverwrite (dict) $defaultAnnotations (.Values.ingress.annotations | default dict) }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -30,12 +6,86 @@ metadata:
     app.kubernetes.io/name: fortiaigate
     app.kubernetes.io/part-of: fortiaigate-platform
     app.kubernetes.io/managed-by: helm
-  {{- if $annotations }}
   annotations:
-    {{- range $key, $value := $annotations }}
+    {{- $className := .Values.ingress.className }}
+    {{- /*
+      use-regex is deliberately NOT set, and must not be re-added casually.
+
+      Every path below is a literal prefix, so nothing needs it. Turning it back
+      on would CHANGE the meaning of those paths.
+      `pathType: Prefix` normally matches on path ELEMENT boundaries, so /ai
+      matches /ai and /ai/... but not /airplane. Under use-regex the same path
+      compiles to `~* "^/ai"`, which does match /airplane -- and it would then
+      disagree with docker/nginx/nginx.conf, whose `location ~ ^/ai(/|$)` is
+      written to keep the two substrates identical.
+
+      Also NOT paired with rewrite-target: the annotation is Ingress-scoped, so
+      it would reshape the upstream path for /api, /ui and /ai alike. The /ai
+      mount root is owned by llm-gateway itself and arrives unchanged -- see
+      llm-gateway/internal/dialect.MountRoot.
+    */}}
+    {{- /* Priority 1: User-defined annotations take precedence */}}
+    {{- if .Values.ingress.annotations }}
+    {{- range $key, $value := .Values.ingress.annotations }}
     {{ $key }}: {{ $value | quote }}
     {{- end }}
-  {{- end }}
+    {{- else if eq $className "alb" }}
+    {{- /* Priority 2: AWS ALB default annotations */}}
+    # === AWS ALB ===
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    {{- if .Values.tls.enabled }}
+    alb.ingress.kubernetes.io/backend-protocol: HTTPS
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTPS
+    {{- end }}
+    {{- else if eq $className "nginx" }}
+    {{- /* Priority 2: NGINX default annotations */}}
+    # === NGINX ===
+    # Bare root -> /ui, because the webui serves under the /ui basePath and a
+    # request for / would otherwise land outside it. Mirrors the docker nginx
+    # `location = /` redirect. (This used to say the rest of / fell through to
+    # the LLM proxy; it does not any more -- the gateway owns /ai and the whole
+    # of / is the console.)
+    nginx.ingress.kubernetes.io/app-root: /ui
+    # Match docker/nginx/nginx.conf's `client_max_body_size 64m`. The two
+    # substrates are meant to behave identically and did not: ingress-nginx
+    # defaults to 1m, nothing here or in the controller install
+    # (k8s/installer_dev.sh) overrode it, so on k8s every request body over 1 MB
+    # was refused by the ingress with an HTML 413 the client cannot parse.
+    #
+    # That capped BOTH paths this Ingress fronts. /ai is llm-gateway, whose
+    # docker limit carries the comment "LLM requests can be big and slow" — so
+    # prompts over 1 MB have been failing on k8s only. It also caps
+    # PUT /api/v1/me/avatar, which the contract, the spec and the WebUI all
+    # promise accepts 2 MB: every picture between 1 and 2 MB failed before
+    # reaching api-go, with the dialog's generic "Could not update your profile
+    # picture" rather than any real reason.
+    #
+    # NB: .Values.ingress.annotations REPLACES this block rather than merging
+    # (see the header), so an operator setting any annotation must re-state this
+    # one.
+    nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+    {{- if .Values.tls.enabled }}
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/healthcheck-protocol: HTTPS
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
+    {{- end }}
+    {{- else if eq $className "traefik" }}
+    {{- /* Priority 2: Traefik default annotations */}}
+    # === Traefik ===
+    {{- if .Values.tls.enabled }}
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+    {{- end }}
+    {{- else }}
+    {{- /* Priority 2: Other ingress controllers (no defaults) */}}
+    # === Other ingress controllers ===
+    {{- if .Values.tls.enabled }}
+    # Backend TLS annotations for other ingress controllers
+    {{- end }}
+    {{- end }}
 
 spec:
   {{- if .Values.ingress.className }}
@@ -61,13 +111,12 @@ spec:
     - http:
     {{- end }}
         paths:
-          - path: /ui
-            pathType: Prefix
-            backend:
-              service:
-                name: webui
-                port:
-                  number: 3000
+          # webui is served under the /ui basePath. More-specific API prefixes
+          # are matched first; /ui and / route the webui; /ai routes the LLM
+          # data plane (llm-gateway), which serves that mount root and nothing
+          # outside it.
+          # /api/ carries the WHOLE management API, /api/v1 included -- one
+          # backend, no per-prefix split.
           - path: /api/
             pathType: Prefix
             backend:
@@ -75,10 +124,40 @@ spec:
                 name: api
                 port:
                   number: 8000
+          - path: /ui
+            pathType: Prefix
+            backend:
+              service:
+                name: webui
+                port:
+                  number: 3000
+          # /ai -> the LLM data plane. The path is passed through UNCHANGED:
+          # llm-gateway owns this mount root itself and serves /ai/openai,
+          # /ai/anthropic, /ai/gemini (llm-gateway/internal/dialect.MountRoot).
+          #
+          # Deliberately NOT a rewrite that strips /ai. rewrite-target is
+          # annotation-scoped -- it would apply to every path in this Ingress,
+          # 404ing /api and /ui -- so stripping would need a second Ingress
+          # object, and `ingress.annotations` REPLACES the chart's defaults
+          # rather than merging, so a customer setting any annotation there
+          # would silently drop the rewrite. The gateway would then answer with
+          # a well-formed 404 and nothing anywhere would say why.
+          - path: /ai
+            pathType: Prefix
+            backend:
+              service:
+                name: llm-gateway
+                port:
+                  number: 8080
+          # Root -> the console, matching the docker deployment (nginx.conf
+          # sends `= /` to /ui). The gateway used to be the catch-all here, so
+          # every typo landed on the data plane and came back as dialect JSON;
+          # it now owns /ai and nothing else, which is what lets a passthrough
+          # namespace be admin-defined without a reserved-prefix list.
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: core
+                name: webui
                 port:
-                  number: 8080
+                  number: 3000

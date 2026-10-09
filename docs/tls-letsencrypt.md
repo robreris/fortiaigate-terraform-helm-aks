@@ -12,7 +12,7 @@ at once:
 - **Frontend (browser) trust.** The chart's ingress emits `spec.tls` referencing
   that secret, which AGIC reads to set the Application Gateway listener
   certificate. A real cert means no browser warning.
-- **Backend trust / the 502.** Core, API, and webui serve HTTPS natively using
+- **Backend trust / the 502.** LLM gateway, API, and webui serve HTTPS natively using
   the same secret. Application Gateway validates the backend certificate chain;
   a self-signed cert has no trusted chain, so every backend is marked unhealthy
   and the gateway returns **502 Bad Gateway**. A Let's Encrypt cert is signed by
@@ -128,14 +128,12 @@ cert-manager swaps in the real cert when issuance completes.
 
 - **Internal services and databases retain TLS.** Terraform creates
   `fortiaigate-internal-tls-secret` from a generated CA and serving certificate.
-  PostgreSQL, Redis, scanners, logd, and license-manager use it. Database clients
+  PostgreSQL, Redis, guardrail services, logd, and license-manager use it. Database clients
   mount it separately and verify against `ca.crt`; the ACME certificate is used
-  only by core/API/webui and the ingress listener.
-- **Upgrading an existing LE deployment re-enables database TLS.** App and database
-  updates are not atomic; schedule an upgrade window and check connectivity after
-  all pods roll. If an already-unhealthy Redis pod stalls the StatefulSet rollout,
-  inspect logs/revisions and recreate the pod after the updated spec is applied.
-  See [supplied certificates and upgrade notes](tls-supplied.md#renewal-and-upgrades).
+  only by LLM gateway/API/webui and the ingress listener.
+- **Older LE deployments may have database TLS disabled.** Re-enabling it needs
+  coordinated database/client rollouts. Build0047 upgrades also require schema
+  and licensing qualification; see [the compatibility audit](build0047-compatibility.md).
 - **Staging → production is a real two-apply step, and production can be flaky.**
   The staging root is untrusted by both browsers and Application Gateway, so the
   502 only clears on production. When you flip, watch for two production-side
@@ -166,13 +164,13 @@ cert-manager swaps in the real cert when issuance completes.
   Fix (implemented): when `letsencrypt_enabled`, `helm.tf` installs the **Stakater
   Reloader** controller (`helm_release.reloader`, scoped to the `fortiaigate`
   namespace via `reloader.watchGlobally=false`) and the chart annotates the
-  core/api/webui Deployments with `secret.reloader.stakater.com/reload:
+  llm-gateway/api/webui Deployments with `secret.reloader.stakater.com/reload:
   fortiaigate-tls-secret` (gated on `tls.reloaderEnabled`, default false — so
   self-signed mode and the EKS root are unaffected). Reloader watches the secret
   and rolls those Deployments **when the cert actually lands**, closing the
   early-roll race and handling silent renewals automatically. The
   `existingSecretChecksum` roll stays as a backstop. (If you ever need to force it
-  by hand: `kubectl rollout restart deployment core api webui -n fortiaigate`,
+  by hand: `kubectl rollout restart deployment llm-gateway api webui -n fortiaigate`,
   but only after the secret shows the production issuer — `kubectl get secret
   fortiaigate-tls-secret -n fortiaigate -o jsonpath='{.data.tls\.crt}' | base64 -d
   | openssl x509 -noout -issuer`.)
@@ -180,19 +178,17 @@ cert-manager swaps in the real cert when issuance completes.
   as a small local Helm chart (`certmanager-issuer/`) rather than a Terraform
   `kubernetes_manifest`, because the latter does a plan-time API dry-run that
   fails before the cert-manager CRDs exist.
-- **Per-backend health probes (NOT a global `health-probe-path`).** Once the
-  trusted cert made AGIC reach the backends, the probes failed on HTTP status
-  because the three services have different health endpoints: core
+- **Per-backend health probes (NOT a global `health-probe-path`).**
+  The three services have different health endpoints: llm-gateway
   `/fortiaigate/health/readiness`, api `/openapi.json`, webui `/ui` (the Next.js
-  `basePath` — `/` 404s by design). AGIC has no per-Service healthcheck-path
+  base path). AGIC has no per-Service healthcheck-path
   annotation like the ALB, and a single ingress-wide `health-probe-path` can't fit
   all three — so each backend pod now carries an httpGet `readinessProbe` and AGIC
   derives the per-backend probe from it. **Do not set `health-probe-path` /
   `health-probe-status-codes` in `ingress_annotations`** (they override the
-  per-backend probes globally). This DID touch the shared `fortiaigate/` chart
-  (readiness probes added to `api.yaml`/`webui.yaml`); the change was mirrored to
-  the EKS repo at the time. Browser entry point is **`/ui`**, not
-  `/`.
+  per-backend probes globally). The AKS port restores API/webui probes and
+  retains the gateway probe. Validate the new binaries' endpoints live. The
+  browser entry point is **`/ui`**; `/` also routes to webui in build0047.
 
 ## Internal TLS
 

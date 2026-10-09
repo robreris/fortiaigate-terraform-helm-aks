@@ -10,27 +10,25 @@ location = "eastus"
 # delete everything in this RG.
 resource_group_name = "fortiaigate-prod"
 cluster_name        = "fortiaigate-prod"
-# build0031 image set. Match all three tags to the images pushed to your ACR.
-image_tag               = "V8.0.1-build0031"
-triton_image_tag        = "25.11-onnx-trt-agt-s1"
-triton_models_image_tag = "0.1.6-s1"
-# Number of LICENSED app nodes — node-keyed licensing pins all pods to licensed
-# nodes, so this must equal your app-node license count. app_node_max_pods
-# (default 110) lets the full service set fit per node.
+# build0047 image set. Match all four tags to the images pushed to your ACR.
+image_tag               = "V8.0.2-build0047"
+triton_image_tag        = "25.11-onnx-trt-agt-rpt-s1"
+triton_models_image_tag = "0.0.4-s1"
+vllm_image_tag          = "0.28.0-rpt-s1"
+# Fixed application pool size, independent of deployment licenses.
 app_node_count = 3
 
-# App node VM size. With one licensed app node, EVERY app pod lands on it: the
-# build0031 service set requests ~12 vCPU / ~24 GiB, so 16 vCPU (D16s_v5, 64 GiB)
-# is the practical minimum — an 8-vCPU size leaves pods Pending. Size up (e.g.
-# Standard_D32s_v5) for headroom. Set it BEFORE the first deploy: resizing the
-# default pool on a live cluster needs azurerm's temporary_name_for_rotation
-# (not set here), and any resize yields a new node name to re-key in `licenses`.
+# Size application nodes for service/database requests and rollout headroom.
+# Choose the size before first deployment; live pool resizing needs planning.
 app_node_vm_size = "Standard_D16s_v5"
 
 gpu_enabled = true
-# A10 (24 GB, SM 86) — Fortinet-supported with the right VRAM/compute; the older
-# V100 fails TensorRT 10. A10/A100 quota defaults to 0 — request it first.
-# See docs/gpu-triton-compatibility.md.
+# Shared mode needs AKS NVIDIA runtime qualification; full scanning needs vLLM.
+# Dedicated mode normally needs two one-GPU nodes. Both modes need live tests.
+vllm_gpu_attach = "shared"
+gpu_node_count  = 1
+# Existing A10 default; combined Triton/vLLM VRAM and startup memory must be tested.
+# Request regional GPU quota before bootstrap; see docs/gpu-triton-compatibility.md.
 gpu_node_vm_size = "Standard_NV36ads_A10_v5"
 
 agic_enabled  = true
@@ -52,13 +50,8 @@ storage_size         = "500Gi"
 storage_account_tier = "Premium"
 storage_account_kind = "FileStorage"
 
-licenses = {
-  # Include all licensed app nodes. If gpu_enabled = true, include the aks-gpu-*
-  # node too; Triton is pinned to both the GPU node selector and licensed hostnames.
-  # "aks-app-12345678-vmss000000" = "licenses/APP1.lic"
-  # "aks-app-12345678-vmss000001" = "licenses/APP2.lic"
-  # "aks-gpu-12345678-vmss000000" = "licenses/GPU.lic"
-}
+# Upload a deployment license through POST /api/v1/admin/licenses after installation.
+# Do not configure the deprecated node-keyed licenses map.
 
 # Optional supplied web/API TLS (mutually exclusive with letsencrypt_enabled).
 # Generated internal service/database TLS remains enabled in every mode.

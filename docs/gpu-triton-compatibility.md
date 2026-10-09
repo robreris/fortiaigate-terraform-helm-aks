@@ -1,121 +1,50 @@
-# GPU compatibility for Triton (Azure)
+# GPU compatibility for Triton and vLLM (Azure)
 
-Triton is the only GPU workload in this stack. The build0031 image
-(`custom-triton:25.11-onnx-trt-agt-s1`, set through
-`var.triton_image_tag`) is expected to use **TensorRT 10.x**, which
-**dropped support for NVIDIA Volta (compute capability SM 70)**. On a Volta GPU
-the Triton pod crashes at engine-build time with:
+Build0047 runs the DLP model in Triton and the policy model in vLLM. Image
+manifests are `linux/amd64`; offline rendering does not establish GPU/runtime
+compatibility. See [the compatibility audit](build0047-compatibility.md#gpu-and-cpu-capability-boundaries).
 
-```
-IBuilder::buildSerializedNetwork: Error Code 9: API Usage Error
-(Target GPU SM 70 is not supported by this TensorRT release.)
-```
+## AKS profiles
 
-This incompatibility was exposed when the original AKS deployment used a V100.
-The current default GPU VM size is an A10.
+| Terraform setting | Layout | Capacity requirement |
+| --- | --- | --- |
+| `gpu_enabled=true`, `vllm_gpu_attach="shared"` | One combined `triton-vllm-server` pod | One GPU with sufficient VRAM; NVIDIA runtime must expose Triton's allocation to vLLM |
+| `gpu_enabled=true`, `vllm_gpu_attach="dedicated"` | Separate Triton/vLLM pods | Separate GPU allocations; typically `gpu_node_count=2` with one-GPU VMs |
+| `gpu_enabled=false` | CPU Triton, no vLLM | POLICY detectors fail closed without vLLM; CPU capability is unqualified |
 
-## Why AWS (EKS) never hit this
+Terraform defaults to an A10 VM (`Standard_NV36ads_A10_v5`) and explicit shared
+mode. This SKU worked for earlier Triton deployments; combined build0047
+Triton/vLLM memory, model loading, and runtime injection still need a live AKS
+test. It is a starting configuration, not a qualified recommendation for the
+new release. Shared pod container memory limits total 49 GiB (25 GiB Triton +
+24 GiB vLLM); host memory and VRAM are different budgets. Chart comments describe
+approximately 16.6 GiB of vLLM GPU use before KV cache and about 3 GiB per Triton
+DLP instance. Increasing model context or instance counts can exhaust VRAM.
 
-The original EKS deployment used an A10G, while the first AKS configuration
-used a V100. The chart copies now have platform-specific changes; align the
-Triton image tags explicitly when comparing deployments:
+## Before deploying
 
-| Stack | Default GPU node | GPU | Compute | TensorRT 10 |
-|-------|------------------|-----|---------|-------------|
-| AWS / EKS | `g5.2xlarge` | A10G | SM 86 (Ampere) | ✅ works |
-| Azure / AKS (original) | `Standard_NC6s_v3` | V100 | SM 70 (Volta) | ❌ rejected |
-| Azure / AKS (current default) | `Standard_NV36ads_A10_v5` | A10 | SM 86 (Ampere) | ✅ compatible |
+Verify region/SKU availability and GPU quota in your subscription using the
+[permissions preflight](permissions-preflight.md). Earlier deployment notes
+identified A10/A100 as supported hardware and TensorRT 10 requiring SM 75+;
+confirm release-specific hardware support before choosing a different GPU.
+Do not reuse the earlier V100 configuration without compatibility testing.
 
-The fix is to put AKS on a GPU that satisfies **both** constraints below — the
-same class of card AWS already runs — by changing `var.gpu_node_vm_size`.
+Provision the GPU pool during the README infrastructure bootstrap. Terraform
+keeps `gpu_driver="Install"` explicit, installs the NVIDIA device plugin, and
+sets the GPU pool's `fortiaigate-gpu=true:NoSchedule` taint. Inference pods
+select `fortiaigate-role=gpu` and tolerate this taint. Choose sufficient
+`gpu_node_count` for dedicated mode and any replica/GPU-count overrides.
 
-## The two constraints the GPU must satisfy
+Use `update_strategy="Recreate"` when capacity has no spare cards for surge
+pods. This introduces downtime but avoids a GPU-constrained rolling update
+stall. Node-pool resizing/replacement also needs a planned interruption;
+build0047 deployment licensing does not require a new hostname license.
 
-1. **TensorRT 10 (the Triton image):** compute capability **SM 75 or newer**
-   (Turing+). Rules out Volta (V100), Pascal, Maxwell, Kepler.
-2. **FortiAIGate hardware spec** ([8.0.0 deployment guide](https://docs.fortinet.com/document/fortiaigate/8.0.0/fortiaigate-administration-guide/512071/fortiaigate-deployment)):
-   supported GPU models are **NVIDIA L4, A10, A100**, each with **≥ 24 GB
-   VRAM** (driver 535+). Per-GPU minimum is "1× GPU with 24 GB VRAM (e.g. L4)".
+## Live qualification
 
-> **The T4 does NOT qualify.** It is SM 75 (passes constraint 1) but has only
-> **16 GB VRAM** and is **not on Fortinet's supported list** (fails constraint 2).
-> A V100 fails both (SM 70 and 16 GB). Do not use either.
-
-## Supported GPU SKUs on Azure
-
-Of Fortinet's three supported models, **L4 is not offered as an Azure VM SKU in
-westus**, leaving **A10** and **A100**. All SKUs below are offered in westus with
-no SKU-level restriction; the only gate is **quota** (see below).
-
-| SKU | vCPU | GPU | VRAM | RAM | Notes |
-|-----|------|-----|------|-----|-------|
-| `Standard_NV36ads_A10_v5` | 36 | 1× A10 | **24 GB** | 440 GiB | **Recommended.** Meets the 24 GB spec; same GPU class as the AWS `g5.2xlarge` (A10G) that already works. |
-| `Standard_NC24ads_A100_v4` | 24 | 1× A100 | 80 GB | 220 GiB | Compliant but premium silicon — overkill for a 24 GB need and pricier per hour. |
-
-> The smaller `NVads_A10_v5` SKUs (`NV6/12/18ads_A10_v5`) expose only a
-> **fractional** A10 vGPU (4–12 GB) — below the 24 GB spec. The full 24 GB card
-> requires `NV36ads_A10_v5`.
-
-**Recommendation:** `Standard_NV36ads_A10_v5`. It is on Fortinet's supported
-list, meets the 24 GB VRAM minimum, satisfies TensorRT 10 (SM 86), and matches
-the A10G the EKS stack runs successfully.
-
-## Quota increase to request
-
-Every GPU family that has quota in `westus` is Volta or older (V100, P100, K80,
-P40, M60 — all rejected by TensorRT 10). Every supported family (A10, A100, and
-the also-compatible T4/H100) sits at **0 vCPU quota**. So changing the VM size
-alone will fail at apply with a quota error — you must request quota first.
-
-Switching regions does **not** avoid this: the supported families default to 0
-quota subscription-wide — verified 0/0 across westus, westus2, westus3, eastus,
-eastus2, centralus, and southcentralus. The quota request is unavoidable.
-
-Request in the **Azure portal → Quotas → Compute**, or via support, for region
-**West US (`westus`)**:
-
-| If you choose | Quota family to raise | Suggested new limit |
-|---------------|-----------------------|---------------------|
-| **A10 (`NV36ads_A10_v5`) — recommended** | **Standard NVADSA10v5 Family vCPUs** | **36 vCPUs** (one full-A10 node) |
-| A100 (`NC24ads_A100_v4`) | **Standard NCADS_A100_v4 Family vCPUs** | **24 vCPUs** (one A100 node) |
-
-Check current quota at any time:
-
-```bash
-az vm list-usage --location westus -o table | grep -iE 'NVADSA10v5|NCADS_A100_v4'
-```
-
-## Applying the change after quota lands
-
-1. Set the new SKU in `tfvars/<subscription>.tfvars`, e.g.:
-
-   ```hcl
-   gpu_node_vm_size = "Standard_NV36ads_A10_v5"
-   ```
-
-2. `gpu_node_vm_size` is **ForceNew** on the GPU node pool, so this **replaces**
-   the pool. The replacement node gets a **new VMSS name**
-   (`aks-gpu-<newhash>-vmss000000`), which **re-keys node-affinity licensing**.
-   After the new node joins, update the GPU entry in `var.licenses` to the new
-   node name and re-apply — same post-apply step as the initial deploy. See the
-   [node-keyed licensing notes](operations.md#node-keyed-licensing).
-
-3. Confirm the node's GPU and that Triton's TensorRT engine builds:
-
-   ```bash
-   kubectl get nodes -L node.kubernetes.io/instance-type,nvidia.com/gpu.product
-   kubectl logs -n fortiaigate -l app.kubernetes.io/name=triton --tail=50
-   ```
-
-## If a supported GPU is not an option
-
-If quota can't be obtained, the alternatives are:
-
-- **Volta-compatible Triton image** — keep the V100 and pin an older
-  `custom-triton` build (TensorRT 8.6 was the last to support Volta, or a build
-  using the CUDA/ONNX-Runtime EP instead of the TensorRT EP). Set
-  `triton_image_tag` to a compatible image published to the ACR; the image
-  build and compatibility testing are outside this repo.
-- **Disable GPU/Triton** — set `gpu_enabled = false` for a clean deploy. Note
-  the scanners are thick-client/thin-server against Triton, so inference does
-  not function in this mode — it is an unblock, not a finished deployment.
+Verify both engines become ready, model decryption/loading succeeds, the GPU
+probe can patch its pod, both engines see the intended device, license coverage
+reflects actual GPU allocations, and DLP/POLICY requests complete. Exercise
+restart, certificate replacement, concurrent scans, and memory pressure. Record
+results and hardware in [the deployment checklist](testing.md). Shared and
+dedicated profiles must be tested separately; changing topology is an upgrade.

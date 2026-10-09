@@ -1,0 +1,231 @@
+{{- /*
+policyGuard vLLM server: the Services, and the standalone Deployment of
+dedicated mode.
+
+Rendered only when fortiaigate.gpu.enabled is true AND vllm.replicas > 0
+(fortiaigate.vllmEnabled in _helpers.tpl): it needs a GPU with compute
+capability >= 8.0 and the faig-models image; CPU-only labs keep the
+policy-guard stub as the backend (scan-queue-admission-design.md).
+
+The serving container, its model loader and its volumes are defined once in
+_vllm.tpl and rendered into one of two pods, by vllm.gpuAttach. The default
+"auto" picks at install time from the cluster's node inventory (helper
+fortiaigate.vllmGpuPlan): dedicated when the GPUs allocatable across the
+nodes, minus what triton-server takes, cover vllm.replicas x gpuCount cards
+of vLLM's own; shared otherwise. Rendered offline (helm template, a
+client-side dry-run) the inventory is unreadable and auto falls back to
+shared; the next install or upgrade re-resolves it, and NOTES.txt prints
+the result. auto never grows the GPU footprint: gpuCount is the operator's
+statement of how many cards vLLM may take, auto only decides whether it gets
+them or shares Triton's.
+
+  shared         vLLM shares Triton's GPU — implemented as CO-LOCATION: a
+                 second container INSIDE every Triton pod (Deployment
+                 triton-vllm-server, templates/triton-server.yaml), on the
+                 card the kubelet
+                 gave Triton: a gpu-probe initContainer requests the card,
+                 reads its UUID and records it on the pod; Triton reuses the
+                 init's allocation (kubelet device reuse); the vllm container
+                 requests no GPU and takes NVIDIA_VISIBLE_DEVICES from that
+                 annotation. One Triton, one vLLM, one card, by construction
+                 — triton.replicas N gives N of each, with no extra licence,
+                 and nothing has to discover, follow or re-verify which card
+                 Triton holds (the gpu-follow init, watch sidecar, ConfigMap
+                 and self-delete of the retired shared-runtime mode are
+                 gone with the bug class behind Mantis 1348127 and 1348128).
+                 The right mode for the common single-GPU deployment and for
+                 HA parity (two nodes, two cards, two of each engine). Both
+                 engines roll together: a change to either's image or
+                 arguments restarts the pod, Triton's TensorRT load AND
+                 vLLM's model load. Depends on the NVIDIA container runtime
+                 being containerd's default and accepting
+                 NVIDIA_VISIBLE_DEVICES from unprivileged containers
+                 (accept-nvidia-visible-devices-envvar-when-unprivileged, on
+                 by default); if an operator turned that off the vllm
+                 container starts with no GPU and crash-loops on "Failed to
+                 infer device type" while Triton is unaffected. vllm.replicas
+                 only switches vLLM on (1) or off (0) here; the count is
+                 Triton's. No Deployment is rendered from this file in this
+                 mode, only the Services.
+  dedicated      vLLM gets GPUs of its own. For a deployment with MORE THAN
+                 ONE GPU: the standalone Deployment below requests
+                 nvidia.com/gpu via resources.limits.gpuCount, exactly as
+                 triton-server does; the device plugin hands out whole cards,
+                 so Triton and vLLM land on different ones, and the preferred
+                 podAntiAffinity prefers a different GPU node when there is
+                 one. The scheduler sees the request, so a GPU-less node is
+                 never a candidate. On a single-card node this mode leaves
+                 vLLM Pending on "Insufficient nvidia.com/gpu" — Triton holds
+                 the only card — unless the cluster time-slices it; use
+                 shared there. gpuCount > 1 runs the model TENSOR-PARALLEL
+                 across the cards (_vllm.tpl).
+  Any other spelling — colocated and shared-runtime (both now shared),
+  device-plugin (now dedicated) — is refused at render time with the current
+  name (fortiaigate.vllmGpuPlan). So is the retired vllm.sharedGpuDevices pin,
+  below: in shared mode the card is Triton's by construction, there is
+  nothing to pin, and a pin that rendered nothing would be a silent no-op.
+
+Neither mode isolates VRAM: --gpu-memory-utilization is vLLM's whole GPU
+budget. Left empty in values it follows the mode (0.85 on a card of its own,
+0.80 beside Triton; helper fortiaigate.vllmGpuMemoryUtilization).
+
+SERVICES. Both are headless and select the fortiaigate.io/policyguard label
+(_vllm.tpl), which the co-located triton-vllm-server pods and the standalone
+vllm-server pods both carry, so one pair serves both modes. Ports are vLLM's
+own (8100 / 9110) on the Service as on the pod — headless Services do no
+port translation — and guardrail.yaml renders its env from the same helpers.
+*/ -}}
+{{- if include "fortiaigate.vllmEnabled" . }}
+{{- $plan := include "fortiaigate.vllmGpuPlan" . | fromJson }}
+{{- $colocated := eq $plan.mode "shared" }}
+{{- $labelKey := include "fortiaigate.policyGuardLabelKey" . }}
+{{- $httpPort := include "fortiaigate.vllmHTTPPort" . }}
+{{- $meterPort := include "fortiaigate.vllmReporterPort" . }}
+{{- /* How auto arrived at its mode, appended to the refusals below. */ -}}
+{{- $why := "" }}
+{{- if eq $plan.requested "auto" }}
+{{- if $plan.known }}
+{{- $why = printf " (auto: %d GPU(s) allocatable, triton-server takes %d, vllm-server needs %d of its own)" (int $plan.total) (int $plan.tritonCards) (int $plan.vllmCards) }}
+{{- else }}
+{{- $why = " (auto: the node inventory is not readable in this render, so shared was assumed; an install or upgrade resolves it from the cluster)" }}
+{{- end }}
+{{- end }}
+{{- /* The retired pin (header). "triton" was its default and did nothing a
+       co-located pod does not do by construction, so a values file still
+       carrying it — every --reuse-values upgrade — passes; a real pin does
+       not. */ -}}
+{{- $pin := (.Values.vllm).sharedGpuDevices }}
+{{- if and (not (kindIs "invalid" $pin)) (ne (toString $pin) "") (ne (toString $pin) "triton") }}
+{{- fail (printf "vllm.sharedGpuDevices=%v is retired: in shared mode (vllm.gpuAttach shared) vLLM runs inside the triton-vllm-server pod on the card the kubelet gave Triton, so there is no card to pin. Remove the key. To put vLLM on a card of its own, set vllm.gpuAttach: dedicated" $pin) }}
+{{- end }}
+{{- if and $colocated (le (int ((.Values.triton).replicas)) 0) }}
+{{- fail (printf "vllm.gpuAttach shared runs vLLM inside the Triton pods (Deployment triton-vllm-server), so it needs triton.replicas >= 1%s. Set vllm.gpuAttach: dedicated to give it a card of its own, or vllm.replicas 0 to run without vLLM" $why) }}
+{{- end }}
+{{- if not $colocated }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-server
+  labels:
+    app: vllm-server
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+spec:
+  replicas: {{ .Values.vllm.replicas }}
+  strategy:
+    type: {{ .Values.fortiaigate.updateStrategy }}
+  selector:
+    matchLabels:
+      app: vllm-server
+  template:
+    metadata:
+      labels:
+        app: vllm-server
+        {{ $labelKey }}: "true"
+        app.kubernetes.io/name: fortiaigate
+        app.kubernetes.io/part-of: fortiaigate-platform
+        app.kubernetes.io/managed-by: helm
+    spec:
+      {{- include "fortiaigate.gpuPlacement" . | nindent 6 }}
+      # ALWAYS named, never omitted. The API server mirrors serviceAccountName
+      # into the deprecated serviceAccount field and refills one from the other,
+      # so an upgrade that merely DROPS the field leaves the previous name in
+      # place — and an upgrade that deletes that ServiceAccount (the retired
+      # vllm-server one of shared-runtime) then leaves no pod creatable
+      # ("serviceaccount not found"). Naming "default" is the reset.
+      serviceAccountName: default
+      # No token: this pod never talks to the API server, and it handles the
+      # scanned text.
+      automountServiceAccountToken: false
+      affinity:
+        # NO licensed-node pinning. A licence now covers the deployment and
+        # names no machine (metering design §1), so there is no node list to
+        # pin to. What places this pod is its GPU request; and PREFER a GPU
+        # node Triton is not on, so a cluster with a spare card elsewhere does
+        # not make the two engines share one node's cards. Only a preference:
+        # when no other node has a free card vLLM lands beside Triton, and the
+        # device plugin's allocation picks a card Triton does not hold.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: {{ include "fortiaigate.tritonName" . }}
+                topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: false  # upstream vllm-openai image runs as root
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      {{- include "fortiaigate.vllmModelLoader" . | nindent 6 }}
+      containers:
+      {{- include "fortiaigate.vllmContainer" (dict "root" . "colocated" false) | nindent 6 }}
+      volumes:
+      {{- include "fortiaigate.vllmVolumes" (dict "root" . "tp" (include "fortiaigate.vllmTensorParallel" (dict "root" . "colocated" false))) | nindent 6 }}
+      {{- with .Values.fortiaigate.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-server
+  labels:
+    app: vllm-server
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+spec:
+  # Headless: policy-guard dials pod IPs, and the meter's discovery
+  # cross-check resolves this name against vllm-server-metering below.
+  clusterIP: None
+  # shared (co-located): pod readiness spans BOTH engines (a pod is Ready only when
+  # every container is), so filtering on it would pull a healthy vLLM out of
+  # POLICY for every Triton restart or TensorRT build. Publish every pod; a
+  # vLLM still loading refuses connections (the loader binds nothing while
+  # decrypting, vLLM listens only once its engine is built) and the judge's
+  # dialer moves to the next address. dedicated: readiness IS vLLM's, so
+  # keep the filter — model-loading pods belong only in metering DNS.
+  publishNotReadyAddresses: {{ $colocated }}
+  selector:
+    {{ $labelKey }}: "true"
+  # Port NAMES differ from the retired 8000/http pair on purpose: a merge that
+  # kept the old element beside the new one (kubectl apply without a
+  # last-applied annotation) would otherwise be refused for a duplicate name.
+  ports:
+  - protocol: TCP
+    port: {{ $httpPort }}
+    targetPort: {{ $httpPort }}
+    name: policyguard
+---
+# The metering endpoint gets its OWN service, and it is HEADLESS. The service
+# above may publish ready pods only; this one also publishes model-loading
+# pods: an engine whose cards are known but whose model is still loading is
+# NOT ready to serve, and its cards still count — excluding it would make
+# coverage improve every time an engine restarted. Discovery unions both sets
+# and checks that every serving IP is metered.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-server-metering
+  labels:
+    app: vllm-server
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{ $labelKey }}: "true"
+  ports:
+  - protocol: TCP
+    port: {{ $meterPort }}
+    targetPort: {{ $meterPort }}
+    name: vllm-meter
+{{- end }}

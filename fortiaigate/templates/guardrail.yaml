@@ -1,0 +1,279 @@
+{{- /*
+Guardrail data plane: the dispatcher front door (image: guardrail) plus its two
+backend scanners (dlp-scanner, policy-guard) which share a second image
+(guardrail-scanner), the binary selected per Deployment by `command`. Headless
+Services on :50051 (gRPC) with a gRPC readiness probe on :50052; internal TLS,
+application-pool placement, and certificate checksums are configured by the AKS port.
+
+policy-guard is the POLICY scanner: it puts each Natural Language detector's
+topics in front of the policyGuard model served by vLLM (templates/
+vllm-server.yaml) and parses the verdict. Where vLLM does not run — no GPUs
+(fortiaigate.gpu.enabled false) or vllm.replicas 0 — POLICY detectors FAIL
+CLOSED (gateway 503) rather than silently passing.
+*/ -}}
+{{- $repo := .Values.fortiaigate.image.repository -}}
+{{- $tag := (.Values.guardrail).tag | default .Values.fortiaigate.image.tag -}}
+{{- $g := .Values.guardrail | default dict -}}
+{{- /* Traffic-normalization DECODE policy (values.yaml
+       guardrail.trafficNormalization.decode), rendered onto the dispatcher only
+       — it is the pod that runs the stage. `default` is unusable for the
+       boolean here (Helm treats false as empty, so `false | default true`
+       yields true); `dig` keeps an explicit false.
+
+       There is no character-screening variable: that half of the stage is
+       per-guardrail policy, carried on each scan request, and no deployment
+       setting can turn it on or off. */ -}}
+{{- $tnDecode := ((.Values.guardrail).trafficNormalization).decode | default dict -}}
+{{- $svcs := list
+  (dict "name" "guardrail"    "img" "guardrail"         "cmd" "/app/guardrail"    "cfg" ($g.guardrail  | default dict))
+  (dict "name" "dlp-scanner"  "img" "guardrail-scanner" "cmd" "/app/dlp-scanner"  "cfg" ($g.dlpScanner | default dict))
+  (dict "name" "policy-guard" "img" "guardrail-scanner" "cmd" "/app/policy-guard" "cfg" ($g.policyGuard | default dict))
+}}
+{{- range $s := $svcs }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $s.name }}
+  labels:
+    app: guardrail
+    guardrail-component: {{ $s.name }}
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+spec:
+  replicas: {{ dig "replicas" 1 $s.cfg }}
+  strategy:
+    type: {{ $.Values.fortiaigate.updateStrategy }}
+  selector:
+    matchLabels:
+      app: guardrail
+      guardrail-component: {{ $s.name }}
+  template:
+    metadata:
+      annotations:
+        {{- if $.Values.tls.enabled }}
+        # restart the pod when the TLS cert/key change
+        checksum/tls: {{ include "fortiaigate.internalTlsChecksum" $ | quote }}
+        {{- end }}
+      labels:
+        app: guardrail
+        guardrail-component: {{ $s.name }}
+        app.kubernetes.io/name: fortiaigate
+        app.kubernetes.io/part-of: fortiaigate-platform
+        app.kubernetes.io/managed-by: helm
+    spec:
+      {{- include "fortiaigate.appPlacement" $ | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: {{ $s.name }}
+        image: {{ $repo }}/{{ $s.img }}:{{ $tag }}
+        imagePullPolicy: {{ $.Values.fortiaigate.image.pullPolicy }}
+        command: ["{{ $s.cmd }}"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - containerPort: 50051
+        - containerPort: 50052
+        readinessProbe:
+          grpc:
+            port: 50052
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        env:
+        {{- if and $.Values.tls.enabled $.Values.tls.internalExistingSecret }}
+        - name: SSL_CERT_FILE
+          value: {{ printf "%s/%s" $.Values.tls.mountPath (ternary "ca.crt" "tls.crt" (ne $.Values.tls.internalExistingSecret "")) | quote }}
+        {{- end }}
+        - name: FORTIAIGATE_LOG_LEVEL
+          value: {{ $.Values.fortiaigate.env.logLevel | quote }}
+        # The scan-request cap. Enforced ONCE, at the dispatcher's receiving
+        # side (the scanners and every client run at the transport ceiling,
+        # and replies are never size-capped, so oversized rewritten results
+        # still flow back); also what ListCapabilities advertises. No other
+        # pod needs this value.
+        - name: GUARDRAIL_MAX_REQUEST_BYTES
+          value: {{ (($g).env).maxRequestBytes | default "10485760" | quote }}
+        {{- if eq $s.name "guardrail" }}
+        - name: GUARDRAIL_DLP_ADDR
+          value: "dlp-scanner:50051"
+        - name: GUARDRAIL_POLICY_ADDR
+          value: "policy-guard:50051"
+        - name: GUARDRAIL_POOL_VERSION
+          value: "v1-{{ $tag }}"
+        # Master key that seals the response vault (the placeholder→original PII
+        # map). Same secret api/dpAgent/llm-gateway use — see fortiaigate.masterKeySecretName.
+        - name: FAIG_MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fortiaigate.masterKeySecretName" $ }}
+              key: master-key
+        # Traffic normalization, decode half: the pre-detector stage that peels
+        # base64 / percent / \uXXXX / \xXX so detectors see real text. Read
+        # ONCE at dispatcher startup and applied to every scan whose ScanRequest
+        # omits `normalization` — which is every scan the gateway sends. A bad
+        # limit action is fatal at start, never defaulted: silently forwarding
+        # at the decode cap where the operator asked to reject is a fail-open
+        # gap.
+        # The pool's answer for every scan that does not carry its own
+        # `short_circuit` — which is every scan the gateway sends, so this is
+        # what decides it in practice. ON: the stages run cheapest-first, so a
+        # DENY from character screening or the in-process regex stage skips the
+        # DLP + policyGuard GPU calls it has already made moot. It cannot move
+        # a VERDICT; what it changes is that the skipped detectors report
+        # SHORT_CIRCUITED and contribute no findings, so a denied request's
+        # violation details name what denied it and not what went unchecked.
+        - name: GUARDRAIL_SHORT_CIRCUIT_DEFAULT
+          value: {{ dig "shortCircuitDefault" true (($g).env | default dict) | quote }}
+        - name: GUARDRAIL_NORMALIZATION_DECODE
+          value: {{ ternary "true" "false" (dig "enabled" true $tnDecode) | quote }}
+        - name: GUARDRAIL_NORMALIZATION_MAX_DECODE_LAYERS
+          value: {{ dig "maxLayers" 2 $tnDecode | quote }}
+        - name: GUARDRAIL_NORMALIZATION_DECODE_LIMIT_ACTION
+          value: {{ dig "limitAction" "deny" $tnDecode | quote }}
+        {{- end }}
+        {{- if eq $s.name "policy-guard" }}
+        {{- if include "fortiaigate.vllmEnabled" $ }}
+        # The policyGuard model: vLLM's OpenAI-compatible server (Service
+        # vllm-server, templates/vllm-server.yaml — headless, so the port here
+        # is the one the container listens on, from the same helper _vllm.tpl
+        # renders --port from; 8100, not vLLM's upstream 8000, because in
+        # shared mode the container shares the triton-vllm-server pod's network
+        # namespace and 8000 is Triton's). The model name comes from the ONE
+        # helper the container's --served-model-name also uses, so the two
+        # cannot drift; it is not a value, because a customer who repointed it
+        # would fail every POLICY scan closed. Tuning knobs (per-call timeout,
+        # chunking, concurrency) go in guardrail.policyGuard.env.
+        - name: POLICYGUARD_VLLM_URL
+          value: "http://vllm-server:{{ include "fortiaigate.vllmHTTPPort" $ }}"
+        - name: POLICYGUARD_VLLM_MODEL
+          value: {{ include "fortiaigate.policyGuardModelName" $ | quote }}
+        {{- else }}
+        # No vLLM in this deployment -- either vllm.replicas is 0 or this is
+        # a non-GPU deployment (fortiaigate.gpu.enabled false), which vLLM
+        # cannot serve at all.
+        #
+        # policy-guard then FAILS every POLICY detector CLOSED: the dispatcher
+        # folds that to UNAVAILABLE and the gateway answers 503, carrying a
+        # reason that names what is missing. It deliberately does NOT return
+        # clean -- a Natural Language detector that passes without a model
+        # would tell an org its rules are enforced while nothing evaluates
+        # them. DLP and REGEX are unaffected, so a CPU deployment still scans
+        # everything else; only policies carrying a Natural Language detector
+        # are refused.
+        - name: POLICYGUARD_STUB
+          value: "true"
+        {{- end }}
+        {{- end }}
+        {{- if eq $s.name "guardrail" }}
+        # The accelerator inventory the licence manager reads through this pod
+        # (interface-spec §6.2). HEADLESS names, deliberately: each is resolved
+        # to EVERY pod behind it and each pod is scraped, because a ClusterIP
+        # would answer from one engine and the fleet would be undercounted.
+        #
+        # Empty would make this pool answer UNIMPLEMENTED instead of reporting
+        # zero cards — a distinction that matters, so the list is built from
+        # what is actually deployed rather than hardcoded.
+        # Prometheus endpoints carrying a gpu_uuid label. Triton publishes
+        # nv_gpu_* on :8002 as shipped, so a stock engine is countable with no
+        # image change at all — the reporter, where present, still wins the
+        # merge because only it resolves a MIG slice, names the product and
+        # stamps the node. vLLM publishes no GPU labels, so it is not listed.
+        # vLLM's reporter listens on its own port (9110, _vllm.tpl): in
+        # shared mode it shares the triton-vllm-server pod with Triton's
+        # reporter on 9109, and the names below are headless, so the port is
+        # the pod's. Two reporters then name the same card; the scraper dedups
+        # by uuid and counts one.
+        - name: GUARDRAIL_METERING_METRICS_ENDPOINTS
+          value: "{{ if and (($.Values.fortiaigate.gpu).enabled) (gt (int (($.Values.triton).replicas)) 0) }}triton-server-metering:8002{{ end }}"
+        - name: GUARDRAIL_METERING_ENDPOINTS
+          value: "{{ $eps := list }}{{ if and (($.Values.fortiaigate.gpu).enabled) (gt (int (($.Values.triton).replicas)) 0) }}{{ $eps = append $eps "triton-server-metering:9109" }}{{ end }}{{ if include "fortiaigate.vllmEnabled" $ }}{{ $eps = append $eps (printf "vllm-server-metering:%s" (include "fortiaigate.vllmReporterPort" $)) }}{{ end }}{{ join "," $eps }}"
+        # Both names are headless. Union their addresses so narrowing the
+        # metering selector cannot hide a pod still reachable for inference.
+        # Meter-only addresses are expected while models are not ready yet.
+        - name: GUARDRAIL_METERING_SERVICE_PAIRS
+          value: "{{ $pairs := list }}{{ if and (($.Values.fortiaigate.gpu).enabled) (gt (int (($.Values.triton).replicas)) 0) }}{{ $pairs = append $pairs "triton-server=triton-server-metering" }}{{ end }}{{ if include "fortiaigate.vllmEnabled" $ }}{{ $pairs = append $pairs "vllm-server=vllm-server-metering" }}{{ end }}{{ join "," $pairs }}"
+        {{- end }}
+        # Per-block scan ceiling, one knob for every component that reads it.
+        # dlp-scanner: truncates GLiNER input to this. policy-guard: truncates
+        # each judged block to this before joining it into the combined text
+        # or cutting it into model windows.
+        # guardrail (dispatcher): uses the SAME number as the per-block
+        # admission charge cap, so a block is charged what will actually be
+        # scanned. All clamp it to the 1.5M hard limit
+        # (go-common/guardrail.HardMaxScanChars).
+        - name: SCANNER_MAX_SCAN_CHARS
+          value: {{ $.Values.guardrail.env.maxScanChars | quote }}
+        {{- if ne $s.name "guardrail" }}
+        # Scanner detection-cache budget in bytes. Empty = automatic
+        # (25% of this container's memory limit). The cache is always capped at
+        # that 25% ceiling even when this number is never reached: a larger
+        # value is clamped down to it at startup. "0" disables the cache.
+        # dlp-scanner caches GLiNER predictions keyed by the scanned text;
+        # policy-guard caches policyGuard verdicts keyed by the rendered rules
+        # AND a tool definition's text (as truncated, before it is cut into
+        # model windows), so a rule or strictness edit misses on its own — for
+        # tool definitions only; its combined conversation is vLLM's prefix
+        # cache's.
+        - name: SCANNER_CACHE_MAX_BYTES
+          value: {{ $.Values.guardrail.env.cacheMaxBytes | quote }}
+        {{- end }}
+        {{- if $.Values.tls.enabled }}
+        - name: FORTIAIGATE_SSL_CERT_FILE
+          value: {{ printf "%s/tls.crt" $.Values.tls.mountPath | quote }}
+        - name: FORTIAIGATE_SSL_KEY_FILE
+          value: {{ printf "%s/tls.key" $.Values.tls.mountPath | quote }}
+        {{- end }}
+        {{- /* per-component extra env (e.g. dlp-scanner CHUNK_SIZE / CHUNK_OVERLAP_SIZE) */}}
+        {{- range $k, $v := $s.cfg.env }}
+        - name: {{ $k }}
+          value: {{ $v | quote }}
+        {{- end }}
+        {{- /* per-component resources (each component sets its own; empty if unset) */}}
+        resources: {{ toYaml ($s.cfg.resources | default dict) | nindent 10 }}
+        {{- if $.Values.tls.enabled }}
+        volumeMounts:
+        - name: tls-certs
+          mountPath: {{ $.Values.tls.mountPath | quote }}
+          readOnly: true
+        {{- end }}
+      {{- if $.Values.tls.enabled }}
+      volumes:
+      - name: tls-certs
+        secret:
+          secretName: {{ include "fortiaigate.internalTlsSecretName" $ }}
+      {{- end }}
+      {{- with $.Values.fortiaigate.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $s.name }}
+  labels:
+    app: guardrail
+    guardrail-component: {{ $s.name }}
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+spec:
+  clusterIP: None  # headless for gRPC client-side load balancing
+  selector:
+    app: guardrail
+    guardrail-component: {{ $s.name }}
+  ports:
+  - protocol: TCP
+    port: 50051
+    targetPort: 50051
+    name: grpc
+---
+{{- end }}

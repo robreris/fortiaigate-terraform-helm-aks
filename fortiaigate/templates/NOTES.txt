@@ -15,23 +15,104 @@
    Application Logs:
    $ kubectl logs -n {{ .Release.Namespace }} -l app=api -f
    $ kubectl logs -n {{ .Release.Namespace }} -l app=webui -f
-   $ kubectl logs -n {{ .Release.Namespace }} -l app=core -f
+   $ kubectl logs -n {{ .Release.Namespace }} -l app=llm-gateway -f
 
-   Scanner Logs (by type):
-   $ kubectl logs -n {{ .Release.Namespace }} -l app=scanner -f
+   Guardrail Logs:
+   $ kubectl logs -n {{ .Release.Namespace }} -l app=guardrail --all-containers -f
 
    Updates:
-   $ helm upgrade {{ .Release.Name }} ./fortiaigate-chart
-   $ helm rollback {{ .Release.Name }} <revision>
+   Use terraform plan/apply with your subscription tfvars for this AKS release.
+   Database migrations require a qualified recovery procedure before rollback.
 
    Cleanup:
    $ helm uninstall {{ .Release.Name }}
 
 💻 Resource Usage:
-{{- if .Values.fortiaigate.gpu }}
+{{- if (.Values.fortiaigate.gpu).enabled }}
    💡 GPU Resources: Enabled - Scanners will use GPU acceleration
 {{- else }}
-   💡 GPU Resources: Disabled - Scanners will run on CPU only
+   💡 GPU Resources: Disabled - vLLM is absent; POLICY detectors fail closed.
+   CPU-only scanning capabilities require live qualification.
+{{- end }}
+{{- if include "fortiaigate.vllmEnabled" . }}
+{{- $plan := include "fortiaigate.vllmGpuPlan" . | fromJson }}
+{{- $vllmGpus := int (dig "resources" "limits" "gpuCount" 1 .Values.vllm) }}
+{{- $tritonGpusForVllm := int (dig "resources" "limits" "gpuCount" 1 (.Values.triton | default dict)) }}
+{{- $tritonReplicas := int ((.Values.triton).replicas) }}
+{{- $gpuAnnotation := include "fortiaigate.gpuDeviceAnnotation" . }}
+{{- $tritonName := include "fortiaigate.tritonName" . }}
+
+🧠 policyGuard vLLM, GPU attachment: {{ $plan.mode }}{{ if eq $plan.requested "auto" }} (resolved by auto){{ end }}
+{{- if eq $plan.requested "auto" }}
+{{- if $plan.known }}
+   {{ int $plan.total }} x {{ $plan.resource }} allocatable on {{ int $plan.nodes }} node(s); triton-server takes {{ int $plan.tritonCards }}, vLLM would need {{ int $plan.vllmCards }} of its own.
+   Re-evaluated on every helm upgrade; set vllm.gpuAttach explicitly to pin a mode.
+{{- else }}
+   The node inventory was not readable in this render (offline template or
+   client-side dry-run), so shared was assumed. An install or upgrade
+   resolves it from the cluster; set vllm.gpuAttach explicitly to pin a mode.
+{{- end }}
+{{- end }}
+{{- if eq $plan.mode "dedicated" }}
+   vLLM has GPUs of its own: each vllm-server pod requests {{ $vllmGpus }} x {{ $plan.resource }}{{ if gt $vllmGpus 1 }} and runs tensor-parallel across them{{ end }}.
+   It stays Pending on "Insufficient {{ $plan.resource }}" if no node has that many
+   free, and POLICY scans then fail closed. Check with:
+   $ kubectl get pod -n {{ .Release.Namespace }} -l app=vllm-server
+   $ kubectl get nodes -o custom-columns=NAME:.metadata.name,GPU_ALLOCATABLE:.status.allocatable.nvidia\.com/gpu
+{{- else }}
+   vLLM shares Triton's GPU: it runs INSIDE each Triton pod (co-located), on the
+   card the kubelet gave Triton. Those
+   pods are Deployment {{ $tritonName }}, labelled app={{ $tritonName }} (READY
+   2/2; there is no vllm-server Deployment in this mode):
+   {{ $tritonReplicas }} Triton pod(s) = {{ $tritonReplicas }} policyGuard(s), {{ $tritonGpusForVllm }} card(s) each{{ if gt $tritonGpusForVllm 1 }}, tensor-parallel across them{{ end }}, no extra licence.
+   The gpu-probe initContainer records the card on the pod; the vllm container
+   attaches it with no GPU request of its own. Both engines restart together
+   whenever either's image or arguments change (one pod). See the card with:
+   $ kubectl -n {{ .Release.Namespace }} get pod -l app={{ $tritonName }} -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,GPU:.metadata.annotations.{{ $gpuAnnotation | replace "." "\\." }}
+   $ kubectl -n {{ .Release.Namespace }} logs -l app={{ $tritonName }} -c gpu-probe
+   $ kubectl -n {{ .Release.Namespace }} logs -l app={{ $tritonName }} -c vllm --tail=50
+   A pod stuck in Init:0/3 with an Init:Error on gpu-probe refused to name a card;
+   `kubectl describe pod` shows why. Needs the NVIDIA container runtime as the
+   default runtime with accept-nvidia-visible-devices-envvar-when-unprivileged
+   left on (the toolkit default): if it is off, the vllm container starts with
+   no GPU and crash-loops on "Failed to infer device type" while Triton serves.
+{{- if gt (int .Values.vllm.replicas) 1 }}
+⚠️  vllm.replicas is {{ .Values.vllm.replicas }}, but in shared mode the number of policyGuards is
+   triton.replicas ({{ $tritonReplicas }}); vllm.replicas only switches vLLM on or off here.
+{{- end }}
+{{- if ne $vllmGpus $tritonGpusForVllm }}
+   vllm.resources.limits.gpuCount ({{ $vllmGpus }}) does not apply in shared mode: vLLM
+   attaches every card of its Triton pod ({{ $tritonGpusForVllm }}).
+{{- end }}
+{{- end }}
+   GPU memory utilization: {{ include "fortiaigate.vllmGpuMemoryUtilization" . }}{{ if not (.Values.vllm).gpuMemoryUtilization }} (chart default for this mode; vllm.gpuMemoryUtilization overrides){{ end }}
+{{- end }}
+{{- $tritonGpus := int (dig "resources" "limits" "gpuCount" 1 (.Values.triton | default dict)) }}
+{{- $dlpInstances := int (dig "dlpInstancesPerGpu" 1 (.Values.triton | default dict)) }}
+{{- if and ((.Values.fortiaigate.gpu).enabled) (gt $tritonGpus 1) }}
+
+⚠️  triton.resources.limits.gpuCount is {{ $tritonGpus }}: Triton runs {{ $dlpInstances }} instance(s) of the DLP model per card.
+{{- if eq .Values.fortiaigate.updateStrategy "RollingUpdate" }}
+   A RollingUpdate needs that many spare GPUs for the surge pod; on a tight node
+   set fortiaigate.updateStrategy: Recreate, or use more replicas at gpuCount 1.
+{{- end }}
+{{- end }}
+{{- if and ((.Values.fortiaigate.gpu).enabled) (gt $dlpInstances 1) }}
+{{- $busyCores := mul $dlpInstances $tritonGpus }}
+{{- $cpu := toString (dig "resources" "limits" "cpu" "" (.Values.triton | default dict)) }}
+{{- $cpuMilli := 0 }}
+{{- if hasSuffix "m" $cpu }}
+{{- $cpuMilli = int (trimSuffix "m" $cpu) }}
+{{- else if $cpu }}
+{{- $cpuMilli = int (mulf (float64 $cpu) 1000) }}
+{{- end }}
+
+🧮 triton.dlpInstancesPerGpu is {{ $dlpInstances }}: {{ $busyCores }} DLP model instance(s) in each Triton pod.
+   Each needs up to about 3 GiB of GPU memory and keeps about one CPU core busy.
+{{- if and $cpu (lt $cpuMilli (mul (add $busyCores 1) 1000)) }}
+⚠️  triton.resources.limits.cpu is {{ $cpu }}, below the {{ add $busyCores 1 }} cores these instances need:
+   CPU throttling will leave the GPU idle. Raise triton.resources.limits.cpu.
+{{- end }}
 {{- end }}
 
    View resource consumption:

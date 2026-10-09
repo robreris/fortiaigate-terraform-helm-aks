@@ -60,7 +60,7 @@ resource "tls_cert_request" "fortiaigate" {
   dns_names = distinct(compact(concat(
     [var.ingress_host, "localhost"],
     flatten([
-      for svc in ["core", "api", "webui", "license-manager", "fortiaigate-postgresql", "fortiaigate-redis-master", "language", "code", "promptinjection", "sensitive", "toxicity", "anonymize", "deanonymize", "customrule", "logd"] : [
+      for svc in ["llm-gateway", "api", "webui", "license-manager", "fortiaigate-postgresql", "fortiaigate-redis-master", "guardrail", "dlp-scanner", "policy-guard", "dp-agent", "logd"] : [
         svc,
         "${svc}.${var.namespace}",
         "${svc}.${var.namespace}.svc",

@@ -15,14 +15,7 @@ resource "azurerm_kubernetes_cluster" "this" {
   default_node_pool {
     name    = "app"
     vm_size = var.app_node_vm_size
-    # Pinned to a fixed node count (min = max = app_node_count). FortiAIGate's
-    # node-keyed licensing pins every pod (via a hostname nodeAffinity built from
-    # the licensed node names) to licensed nodes only — so an unlicensed extra
-    # node is invisible to the workload and autoscaling buys nothing. With one
-    # app license, ALL app pods must fit on ONE node, which is why max_pods is
-    # raised well above the Azure CNI default of 30 (the full service set +
-    # system daemonsets exceeds 30). max_pods is set at creation; classic Azure
-    # CNI draws pod IPs from the aks subnet (/20 = 4096 IPs, ample).
+    # Keep the application pool at the configured fixed size.
     node_count           = var.app_node_count
     min_count            = var.app_node_count
     max_count            = var.app_node_count
@@ -98,14 +91,13 @@ resource "azurerm_kubernetes_cluster_node_pool" "gpu" {
   # Pin the AKS-managed NVIDIA driver install. azurerm records this as "Install"
   # on creation; leaving it unset makes the provider plan it to null, and the
   # field is ForceNew — so omitting it triggers a destructive pool replacement
-  # (and a new node name, which re-keys licenses) on the very next apply.
+  # on the very next apply.
   gpu_driver           = "Install"
   auto_scaling_enabled = true
-  # Keep the licensed hostname alive between bootstrap and workload install.
-  # Scaling to zero can replace it with an unlicensed hostname on scale-up.
-  min_count  = 1
-  max_count  = 1
-  node_count = 1
+  # Explicit capacity avoids auto lookup changing topology during upgrades.
+  min_count  = var.gpu_node_count
+  max_count  = var.gpu_node_count
+  node_count = var.gpu_node_count
 
   node_labels = {
     fortiaigate-role = "gpu"

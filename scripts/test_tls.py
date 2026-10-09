@@ -47,6 +47,9 @@ resource "azurerm_kubernetes_cluster" "this" {
             "-plugin-dir=" + str(ROOT / ".terraform/providers"),
         ], cwd=target, check=True)
         subprocess.run([
+            "terraform", "validate", "-no-color",
+        ], cwd=target, check=True)
+        subprocess.run([
             "terraform", "test", "-test-directory=tests/terraform", "-no-color",
         ], cwd=target, check=True)
 

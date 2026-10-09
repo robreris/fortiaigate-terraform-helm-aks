@@ -18,9 +18,9 @@ python3 scripts/test_tls.py # Terraform 1.7+; mocked tests in an isolated checko
 ```
 
 The Helm suite renders representative AKS values and checks CPU/GPU behavior,
-licensed hostname affinity, independent app/Triton image tags, backend readiness
+deployment licensing and app/GPU placement, independent app/Triton image tags, backend readiness
 paths, separate database disks,
-separate web/internal TLS secrets and rollout checksums, and staging/production Certificate resources.
+shared/dedicated inference topology, separate web/internal TLS secrets and rollout checksums, and staging/production Certificate resources.
 The certificate preflight tests use real temporary keys/certificates. The mocked
 Terraform suite covers generated, supplied public/private, and Let's Encrypt
 modes, as well as invalid input combinations.
@@ -41,42 +41,43 @@ two-step bootstrap. These operations create billable Azure resources.
 
 1. Check regional AKS version availability, GPU quota, image availability, and
    principal permissions. Set `acr_id` if this stack should manage image pull access.
-2. Start with CPU-only (`gpu_enabled = false`) and a licensed app node. Verify
+2. Start with CPU-only (`gpu_enabled = false`) and an app node. Verify
    all pods become ready, shared and database PVCs bind, and `/ui` is reachable.
    Self-signed TLS requires explicit Application Gateway backend trust; follow
    [the TLS guide](application-gateway-dns-tls.md) before diagnosing HTTP 502s.
-3. Enable the GPU pool using the bootstrap targets, record its actual hostname,
-   and populate its license before the full apply. Verify Triton schedules on
-   that node and a request using GPU-backed scanning completes.
+3. Enable the GPU pool using the bootstrap targets, choose shared/dedicated topology and sufficient GPU capacity
+   before the full apply. Verify Triton schedules on
+   the GPU pool and both DLP and POLICY requests complete; check
+   license onboarding, metering, model loading, device visibility, and memory.
 4. Run a second plan with the same tfvars. Investigate unexpected replacement or
    perpetual updates, especially GPU nodes and storage. The GPU minimum is now
    one while enabled, preserving the node during idle/bootstrap periods and
    continuing to incur its VM cost. Node repair/upgrade can still replace it.
 5. Exercise Let's Encrypt staging then production in a disposable DNS name.
-   Confirm Certificate readiness, gateway health, and pod reload after secret
+   Upload the deployment license through the admin API. Confirm Certificate
+   readiness, gateway health, and pod reload after secret
    changes. Verify PostgreSQL/Redis TLS against the separate internal CA. Test supplied
    public/private certificates and replacement using [the supplied TLS guide](tls-supplied.md).
+   Verify gateway/API-to-guardrail and license-manager RPC/database trust when
+   web and internal certificates have different issuers.
 6. Back up and restore database data and the shared file data. Test a node
-   replacement and license reassignment before planning a production upgrade.
+   replacement and deployment license coverage before planning a production upgrade.
 7. Follow the README teardown sequence; check for remaining disks/shares and
    confirm retained data matches expectations before deleting the resource group.
 
 ## Existing deployment review
 
-Review a saved plan before applying these changes. GPU `min_count` changes from
-zero to one. Standard storage now requests `Standard_LRS`; StorageClass parameters
-may require replacement if an existing class used the wrong SKU. Existing PVCs
-are not migrated. No storage account naming migration is included in this pass.
-Examples remove global AGIC probes; make the same correction in your ignored
-local tfvars. Each backend has a different readiness endpoint.
+Build0047 targets fresh installations. Database migration and conversion from
+node-keyed licensing are not qualified; use [the compatibility audit](build0047-compatibility.md).
 
-The 8.0.1/build0031 chart upgrade also changes the app and Triton image tags,
-core/scanner environment values, and Triton model configuration. Its ingress
-routes `/ui` to webui, `/api/` to api, and `/` to core. Terraform passes a chart
-digest to the Helm release so local chart edits produce an upgrade plan. Test
-both a first install and an upgrade with real licenses and pushed images before
-using this chart in production; the offline suite cannot confirm runtime model
-loading, scanning, or data migration.
+Review a saved plan before applying changes. Application services, licensing,
+encryption, and ingress routes change with build0047. Existing PVCs and database
+schemas are not migrated by this port. Retain credential resource addresses,
+back up data and keys, and qualify application schema/license conversion before
+reusing old storage. Each ingress backend has a different readiness endpoint;
+remove global AGIC probe-path overrides from local tfvars. Terraform passes a
+chart digest, including files used by the GPU probe, so local edits produce an
+upgrade plan. Offline suites cannot confirm runtime scanning or data migration.
 
 Azure behavior references: [cluster autoscaler](https://learn.microsoft.com/en-us/azure/aks/cluster-autoscaler-overview)
 and [Azure Files CSI provisioning](https://learn.microsoft.com/en-us/azure/aks/azure-csi-files-storage-provision).
@@ -89,3 +90,17 @@ licenses, keys, kubeconfigs, state, plans, and rendered manifests. Build source
 archives from committed files (`git archive`) rather than archiving the working
 directory. Record the tested Azure region, AKS version, image tag, TLS mode,
 CPU/GPU results, and known limitations in the release notes.
+
+## Build0047 offline port status
+
+The AKS port preserves app/GPU placement, database disks, Terraform-owned
+credentials/encryption/CSRF, and independent web/internal TLS. Tests cover new
+ingress routes and probes, shared/dedicated GPU shapes, image defaults, legacy
+license rejection, and explicit GPU capacity. No live AKS results are recorded
+for build0047. CPU-only POLICY detectors fail closed without vLLM; do not treat
+a successful CPU render as proof of full scanning capability.
+
+On 2026-10-09 the port passed 19 Python/Helm/certificate tests, 15 mocked
+Terraform runs, isolated Terraform validation, TFLint 0.53.0/Azure ruleset 0.27.0,
+formatting, documentation link checks, and proxy/GPU-probe syntax checks.
+Existing Azure provider deprecation warnings are still present.

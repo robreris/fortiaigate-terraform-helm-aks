@@ -4,9 +4,9 @@ Terraform supports three web/API TLS sources: the generated deployment CA
 (default), supplied PEM files, or Let's Encrypt. Supplied certificates and
 Let's Encrypt are mutually exclusive.
 
-In all three modes, PostgreSQL, Redis, scanners, logd, and license-manager use
+In all three modes, PostgreSQL, Redis, guardrail services, logd, and license-manager use
 `fortiaigate-internal-tls-secret`, signed by a generated deployment CA.
-Core, API, webui, and the ingress listener use `fortiaigate-tls-secret`.
+LLM gateway, API, webui, and the ingress listener use `fortiaigate-tls-secret`.
 Database clients mount the internal secret separately and trust its `ca.crt`.
 A supplied web certificate therefore does not need Kubernetes service names.
 
@@ -57,7 +57,7 @@ an automatically executed Terraform hook.
 ## Application Gateway trust
 
 The gateway presents the supplied certificate to browsers/API clients, and
-core/API/webui present the same certificate on the gateway's HTTPS backend
+LLM gateway/API/webui present the same certificate on the gateway's HTTPS backend
 connections. Terraform sets both backend and health-probe hostnames to
 `ingress_host` so the supplied certificate does not need `localhost` or internal
 service names. Avoid overriding those annotations with a different hostname.
@@ -84,16 +84,20 @@ public certificates without a supplied root, and for Let's Encrypt.
 `internal_tls_ca_certificate` exports the generated internal CA in every mode;
 it is separate from web/API trust in supplied and Let's Encrypt modes.
 
-Direct HTTPS connections to core/API/webui must use a name covered by the supplied
+Direct HTTPS connections to LLM gateway/API/webui must use a name covered by the supplied
 certificate. An internal service DNS name will usually not match a public web
 certificate. Direct clients of the other internal services use the generated CA.
 
 ## Renewal and upgrades
 
+Build0047 targets fresh installations. Migration from older application schemas
+and node-keyed licenses is unqualified; see [the compatibility audit](build0047-compatibility.md).
+The TLS transition notes below do not establish application upgrade support.
+
 Supplied certificates are not automatically renewed. Replace the PEM files,
 rerun the validator, and plan/apply using the same paths. Terraform updates the
-web secret and its certificate checksum rolls core/API/webui. Changing only the
-web certificate does not roll databases, scanners, logd, or license-manager.
+web secret and its certificate checksum rolls LLM gateway/API/webui. Changing only the
+web certificate does not roll databases, guardrail services, logd, or license-manager.
 Let's Encrypt continues to use cert-manager and Reloader for automatic renewals.
 
 Existing generated CA/key/certificate resource addresses are retained. The new

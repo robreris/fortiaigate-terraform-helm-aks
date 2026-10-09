@@ -11,42 +11,43 @@ global:
   security:
     allowInsecureImages: true
 
-  # License Management
-  # Map of node names to their license files.
-  # Pods will ONLY be scheduled on these specific nodes.
-  # Example:
-  # licenses:
-  #   "worker-node-1": files/licenses/license-1.lic
-  #   "worker-node-2": files/licenses/license-2.lic
-  licenses: {}
+  # global.licenses IS GONE. Licences were a map of node name -> .lic file: the
+  # chart mounted them as a ConfigMap and pinned every pod to those nodes.
+  # A licence now covers the DEPLOYMENT and is uploaded through the admin API
+  # (POST /api/v1/admin/licenses), which stores it in the database — so there
+  # is nothing to template, nothing to mount, and no node list to pin to.
+  #
+  # A fresh install therefore carries NO licence values at all. That is also
+  # what makes the chart installable out of the box: with the map left empty
+  # the rendered nodeAffinity had an empty `values`, which Kubernetes rejects.
 
 # FortiAIGate Global Configuration
 fortiaigate:
-  # Common image configuration.
-  # Terraform sets these from var.image_repository and var.image_tag (see helm.tf).
-  # A placeholder registry keeps standalone lint/template commands valid;
-  # Terraform supplies the real image repository for deployment.
+  # Common image configuration
   image:
+    # Specify your container registry address and image tag.
     # Example:
     # repository: 192.168.0.1:5000
-    # tag: V8.0.1-build0031
-    repository: "example.com/fortiaigate"
-    tag: "V8.0.1-build0031"
+    # tag: v8.0.0-build0001
+    repository: ""
+    tag: "V8.0.2-build0047"
     pullPolicy: IfNotPresent
     pullSecrets: []
+
+  # Optional placement overrides; Terraform selects AKS app/GPU pools.
+  appWorkloadPlacement:
+    nodeSelector: {}
+    tolerations: []
+  gpuWorkloadPlacement:
+    nodeSelector: {}
+    tolerations: []
 
   # Global GPU configuration
   gpu:
     enabled: true  # Set to false to run on non-GPU nodes
 
-  # Placement for GPU-backed workloads such as Triton.
-  # Terraform sets this automatically when gpu_enabled = true.
-  gpuWorkloadPlacement:
-    nodeSelector: {}
-    tolerations: []
-
-  # Update strategy for all Deployment workloads (api, webui, core, logd, triton, scanners).
-  # Does NOT apply to the license-manager DaemonSet, which always uses RollingUpdate.
+  # Update strategy for application/inference Deployments.
+  # The leader-elected license-manager pair retains RollingUpdate.
   #
   # "RollingUpdate" (default): starts new pods before terminating old ones — zero downtime,
   #   but requires spare capacity. On GPU-constrained nodes, the new Triton pod will be stuck
@@ -58,10 +59,76 @@ fortiaigate:
   # Global environment variables
   env:
     logLevel: "INFO"
+    csrfSecretKey: ""
+    csrfExistingSecret: ""
+
+  # Failure policy — deployment-wide pins for the three knobs that decide how
+  # the gateway treats a failing upstream call. Consumed by BOTH the
+  # llm-gateway and the api pods (like env.logLevel above, which is why it
+  # sits here and not under llmGateway.env): the gateway applies the policy on
+  # every request, and api's manual Check Health sends failThreshold attempts
+  # with the same cooldown, so the two must read the same numbers.
+  #
+  # Vocabulary. Two of these are easy to confuse — the "retries before a model
+  # is taken out of rotation" number is failThreshold, NOT retryTimes:
+  #
+  #   retryTimes       upstream RETRIES per request across a model's credential
+  #                    pool. The gateway makes retryTimes + 1 attempts before it
+  #                    enters the fallback chain. 0 is legal = one attempt. This
+  #                    is NOT "retries before a model is taken out of rotation".
+  #   failThreshold    consecutive failures on one (credential, model) pairing
+  #                    before its circuit opens and the pairing leaves rotation
+  #                    for the cooldown. This IS the "retries before a model is
+  #                    taken out of rotation" number, and the number of attempts
+  #                    a manual Check Health sends. Minimum 1.
+  #   cooldownMinutes  minutes an open circuit stays open. Minimum 1.
+  #
+  # Precedence: a Helm pin here > the org's Runtime Defaults document
+  # (GET/PATCH /api/v1/settings/runtime-defaults) > the documented defaults
+  # (retryTimes 3 / failThreshold 3 / cooldownMinutes 5). Empty = not pinned:
+  # the org document governs and an admin edits it through the API. A pinned
+  # knob overrides the org document deployment-wide: GET reports the pinned
+  # value and lists the field under deploymentManaged, and a PATCH naming that
+  # field is refused with 422. Per-model overrides — the Retry / Cooldown a
+  # fallback rule used to set on its primary — were retired 2026-09-28 (#91);
+  # there is no per-rule or per-model level any more.
+  #
+  # Takes effect when the llm-gateway and api pods restart, which a helm
+  # upgrade that changes any of these values does (it changes the pod env and
+  # rolls both deployments). No config recompile is involved: the pin is
+  # overlaid in-process on every snapshot the pods load. Rendered as
+  # FAIG_FAILURE_POLICY_{RETRY_TIMES,FAIL_THRESHOLD,COOLDOWN_MINUTES} only
+  # when set (a literal 0 IS set; "", a blank string and null are not), as
+  # plain digits whatever the YAML spelling (a file's 1000000 does not become
+  # "1e+06"). A malformed pin — not a whole number, outside int32,
+  # retryTimes < 0, failThreshold or cooldownMinutes < 1 — or a key here other
+  # than these three fails the RENDER (helm install / upgrade / template),
+  # naming the key, so the running pods are kept; the pods apply the same rule
+  # at startup for an env that reaches them another way. Never a silent
+  # fallback to the org document.
+  #
+  # api.runtimeDefaults.{failThreshold,cooldownMinutes}, which a reverted
+  # mechanism briefly shipped (Helm BELOW the org document), is refused at
+  # render time when set: move the value here, where it OVERRIDES the org
+  # document instead.
+  failurePolicy:
+    retryTimes: ""        # empty = not pinned; 0 is a legal pin (one attempt)
+    failThreshold: ""     # empty = not pinned; >= 1
+    cooldownMinutes: ""   # empty = not pinned; >= 1
 
 # API Service Configuration
 api:
   replicas: 1
+
+  # Existing Secret (key "master-key") holding the master key that seals
+  # credential secrets at rest. Empty = fall back to
+  # dpAgent.masterKeyExistingSecret, then to a Secret the chart generates and
+  # keeps stable across upgrades (templates/master-key-secret.yaml) — a fresh
+  # install always gets real encryption, with no manual secret-creation step.
+  # Set this only to bring your own key (e.g. to share one already used
+  # elsewhere). Every service that writes or resolves credential values must
+  # see the SAME key — see fortiaigate.masterKeySecretName in _helpers.tpl.
+  masterKeyExistingSecret: ""
 
   resources:
     limits:
@@ -75,6 +142,12 @@ api:
 webui:
   replicas: 1
 
+  # Per-service image tag override. Leave empty to inherit fortiaigate.image.tag.
+  # Set via `--set webui.image.tag=<tag>` to update ONLY webui without disturbing
+  # the other services that still reference the shared fortiaigate.image.tag.
+  image:
+    tag: ""
+
   resources:
     limits:
       cpu: 500m
@@ -84,20 +157,43 @@ webui:
       memory: 256Mi
 
 # Core Service Configuration
-core:
+llmGateway:
   replicas: 1
 
   env:
-    # Maximum number of concurrent requests the FortiAIGate will process parallelly.
-    # Requests beyond this limit will be queued until capacity is available.
-    # NOTE: This limit applies per FortiAIGate AIFlow instance (replica). Total parallel capacity
-    # is (maxParallelRequests * core.replicas).
-    maxParallelRequests: 100
-    # Timeout in seconds for requests from AI Gateway to upstream LLM providers (e.g. OpenAI, Anthropic)
+    # In-flight request admission budget, in bytes. Empty = automatic (a
+    # quarter of resources.limits.memory below).
+    maxInflightBytes: ""
+    # Bifrost worker-pool size for concurrent upstream LLM calls; requests
+    # beyond it queue inside Bifrost (not an admission limit).
+    poolSize: 1000
+    # Idle-connection pool size for the Redis log-stream sink.
+    logRedisPoolSize: 64
+    # Timeout in seconds for requests to upstream LLM providers.
     upstreamLlmRequestTimeout: 600
-    # Build0031 core uses this flag for outbound LLM TLS verification.
+    # Outbound TLS to upstream LLM providers; verify: false = trust all
+    # (for self-signed backends).
     upstreamTls:
       verify: true
+    # Let the gateway dial upstream endpoints on private (RFC 1918) networks.
+    # Needed for any endpoint override onto the cluster network; false gives
+    # Bifrost's own SSRF posture for a deployment with no private upstream.
+    upstreamAllowPrivateNetwork: true
+    # The in_stream response scan's sliding window, in BYTES
+    # (docs/workflows/in-stream-scan.md). A window scan fires once the window
+    # holds chunkBytes; consecutive windows share overlapBytes — half held
+    # back and judged again with the next window, so a value cut by a window
+    # edge is caught whole, half re-sent as context for the policy judge. The
+    # first bytes reach the client after about chunkBytes of model output.
+    # Empty = the binary's defaults (4096 / 1024). overlapBytes must be even
+    # and at most half of chunkBytes, chunkBytes at least 1024; an unusable
+    # pair falls back to the defaults with a startup WARN. An org may override
+    # the chunk through its Runtime Default stream_scan_buffer_chars (the API
+    # field streamScanBufferChars; 0 = unset): set, it governs that org's
+    # streams, with this overlap clamped to half of it.
+    inStream:
+      chunkBytes: ""
+      overlapBytes: ""
 
   resources:
     limits:
@@ -107,179 +203,421 @@ core:
       cpu: 1000m
       memory: 2Gi
 
+# Guardrail data plane.
+guardrail:
+  env:
+    # Max characters the model-based scanners (DLP entity detection and
+    # Natural Language policy judging) scan per block; longer content is
+    # truncated and the rest is NOT scanned by them. Regex detectors are not
+    # limited by it: they always scan the whole block (a request is bounded by
+    # maxRequestBytes below). 50000 covers a chat prompt and most
+    # retrieval-augmented ones whole; a long pasted document is cut.
+    #
+    # It is also what the GPU scan queues charge one block, so it divides how
+    # many long scans run at once: keep GUARDRAIL_DLP_QUEUE_CHARS and
+    # GUARDRAIL_POLICY_QUEUE_CHARS (below) at least ~20x this value, or one
+    # long request can fill a queue on its own and others get HTTP 429.
+    # Raising it scans more of a long document and costs GPU in proportion;
+    # lowering it is the fastest way to cut scan latency if long prompts are
+    # common. Hard ceiling 1500000 (1.5M): a larger value is clamped down to
+    # it, and an empty, zero or invalid value means the ceiling itself.
+    maxScanChars: "50000"
+    # Scanner detection-cache size, in bytes. Empty = automatic; "0" disables.
+    # One knob for both scanner pods, each keeping its own cache against its
+    # own memory limit: dlp-scanner remembers GLiNER predictions per text,
+    # policy-guard remembers policyGuard verdicts per (rules, tool definition)
+    # prompt — the tool list only. The conversation it judges as one combined
+    # text is left to vLLM's prefix cache (vllm.extraArgs below), not kept here.
+    cacheMaxBytes: ""
+    # Max size of one scan request, in bytes; a larger request gets HTTP 413.
+    maxRequestBytes: "10485760"
+    # What `short_circuit` means for a scan that does not set it — which is
+    # every scan the gateway sends, so this is what decides it in practice. A
+    # caller that does set the field overrules this, either way.
+    #
+    # On: stop scanning once a DENY is folded. The dispatcher checks
+    # cheapest-first — character screening, then the in-process regex stage,
+    # then DLP and policyGuard on the GPU — so a deny from a cheap check skips
+    # the GPU calls it has already made moot.
+    #
+    # The VERDICT is identical either way. What changes is that the skipped
+    # detectors report SHORT_CIRCUITED and contribute no findings, so a denied
+    # request's traffic-log violation details name what denied it and not what
+    # went unchecked. Set false for deployments that must record every detector
+    # on every request.
+    shortCircuitDefault: true
+
+  # Traffic normalization: decode encoded content (base64, percent-encoding,
+  # \uXXXX, \xXX) before scanning, so detectors see the real text. Suspicious-
+  # character screening is configured per guardrail in the UI, not here.
+  # Invalid values prevent the guardrail pod from starting.
+  trafficNormalization:
+    decode:
+      # Decode encoded content before scanning.
+      enabled: true
+      # Max stacked encodings to decode (1-5; larger values are clamped).
+      maxLayers: 2
+      # When content is still encoded at the maxLayers cap: "deny" rejects the
+      # request, "alert" logs and scans the partially decoded text.
+      limitAction: alert
+
+  # Each component takes: replicas, an optional `env:` map (extra NAME: value
+  # environment variables), and `resources:` block
+  guardrail:            # dispatcher front door
+    replicas: 1
+    # Scan-queue limits per pod, in characters of in-flight content. Over
+    # capacity a scan is rejected with HTTP 429 (retryable). "0" = no limit.
+    env:
+      # Characters normalized and regex-scanned at once (CPU work).
+      # Keep it well above maxRequestBytes.
+      GUARDRAIL_PRECHECK_QUEUE_CHARS: "100000000"
+      # Characters in flight to each GPU scanner; keep the two values equal.
+      # Size to your GPU: the default suits one NVIDIA L4. Raise it for a
+      # faster GPU, lower it for a slower one. Too high and queued scans time
+      # out; too low and scans get HTTP 429 under load.
+      GUARDRAIL_DLP_QUEUE_CHARS: "2000000"
+      GUARDRAIL_POLICY_QUEUE_CHARS: "2000000"
+      # Max scan requests open at once.
+      GUARDRAIL_MAX_INFLIGHT_SCANS: "1000"
+      # Max seconds for one scan, waiting included. Size it, and the
+      # *_QUEUE_CHARS windows above, against your clients' patience: a scan a
+      # client gives up on is logged with the keyword `scan_abandoned`.
+      GUARDRAIL_SCAN_BUDGET_SECONDS: "600"
+    # Memory is bounded by text in flight (the queue caps above), not by
+    # detectors: redaction and placeholder restore keep only a small map per
+    # scan. CPU is what grows with traffic (normalization + regex per char).
+    resources:
+      limits:
+        cpu: "5000m"
+        memory: "4Gi"
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+
+  dlpScanner:
+    replicas: 1
+    env:
+      CHUNK_SIZE: "512"
+      CHUNK_OVERLAP_SIZE: "128"
+      # DLP_LOG_SCAN_TEXT: "true"  # DEBUG only: log each judged block's text as scanned
+    # About 1Gi in use while scanning a block at the 1.5M-character
+    # maxScanChars ceiling, far less at the default; the detection cache may
+    # add up to 25% of the limit on top over time (1Gi at the 4Gi below).
+    resources:
+      limits:
+        cpu: "5000m"
+        memory: "4Gi"
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+
+  policyGuard:
+    replicas: 1
+    # The model endpoint comes from the `vllm` section below; when vLLM is not
+    # running, POLICY detectors fail closed. Tuning, all optional:
+    env:
+    #   POLICYGUARD_CONSTRAIN_OUTPUT: "false"   # force the answer into the verdict grammar
+    #   POLICYGUARD_STRICTNESS: "medium"        # 1-5, or lowest|low|medium|high|highest
+    #   POLICYGUARD_THRESHOLD: ""               # unset = 0.5 (VirtueAI's gate); "0" turns the gate OFF
+    #   POLICYGUARD_VLLM_TIMEOUT_SECONDS: "60"  # per model call
+    #   POLICYGUARD_CHUNK_CHARS: "12000"        # longest text per model call
+    #   POLICYGUARD_CHUNK_OVERLAP: "2000"       # characters consecutive windows share
+    #   POLICYGUARD_MAX_RULE_DEFINITION_CHARS: "48000"  # cap on one detector's rendered rules
+    #   POLICYGUARD_CONTEXT_TOKENS: ""          # model context in TOKENS for the rules pre-flight; unset = learned from vLLM
+    #   POLICYGUARD_CONCURRENCY: "8"            # model calls in flight per scan
+    #   (the verdict cache is sized by guardrail.env.cacheMaxBytes above, not here)
+    #   POLICYGUARD_MAX_TOKENS: "8"             # answer cap
+    #   POLICYGUARD_VLLM_API_KEY: ""            # when vLLM runs with --api-key
+    #
+    # CONSTRAIN_OUTPUT is off by default. The model answers in the verdict
+    # format on its own, and forcing the format hides the one signal that says
+    # the wrong model is being served: an answer that cannot be parsed fails
+    # the detector closed and names the cause, while a forced answer looks
+    # valid whatever produced it. Turn it on only for a model that needs it.
+    #
+    # STRICTNESS is the biggest lever on the false-positive rate: the same text
+    # can be safe at 1 and unsafe at 5. It applies only to detectors whose own
+    # policy does not set one; without either, scanning is at 3 (medium).
+    #
+    # THRESHOLD only tightens. A hit needs the model's "unsafe" verdict AND
+    # P(unsafe) STRICTLY ABOVE THRESHOLD, so it can only ever subtract hits; a
+    # "safe" verdict is never flagged whatever its probability.
+    #
+    # UNSET IS 0.5 AND IT IS LIVE (changed 2026-09-16). That is VirtueAI's
+    # shipped default for this checkpoint, and it bites here because P(unsafe)
+    # is their raw measure: the sampled verdict token's own probability. A
+    # greedy "unsafe" at 0.45, with the rest of the mass on other continuations,
+    # is now suppressed where it used to be a hit.
+    #
+    # "0" TURNS THE GATE OFF and restores the previous behaviour, where every
+    # verdict the model called unsafe was a hit. That is the rollback lever if
+    # the gate is found to cost recall; it needs no image rebuild.
+    #
+    # Raising it FAILS OPEN: every increment suppresses hits the model flagged,
+    # so a careless 0.95 quietly stops enforcing while still reporting healthy.
+    # A value over 1 could never be cleared, so it is repaired to 0.5 rather
+    # than honoured.
+    #
+    # CHUNK_CHARS is the longest text judged in one model call; longer content
+    # is split into overlapping windows and every window is judged. Both caps
+    # are CHARACTER counts, the unit a rule author and an operator can see.
+    #
+    # The defaults are chosen so a window always fits beside the rules inside
+    # vllm.maxModelLen, with nothing measured at scan time: 12000 characters of
+    # content plus at most 48000 of rules is roughly 12000 tokens, comfortably
+    # inside a 16384-token context. Raise CHUNK_CHARS for fewer, longer model
+    # calls per document, and check the pair still fits your maxModelLen. A
+    # window the server does refuse as too long is halved and re-judged, so a
+    # cap set too high costs extra calls rather than a failed scan.
+    #
+    # CHUNK_OVERLAP is what consecutive windows share, so a violation on a
+    # boundary is still seen whole. SET LARGER THAN HALF THE WINDOW, IT IS
+    # REDUCED TO HALF: windows may share at most half of one, or each advances
+    # by so little that nearly every window is judged twice. A smaller value is
+    # always kept as set.
+    #
+    # MAX_RULE_DEFINITION_CHARS bounds one detector's rendered rules. A
+    # detector over it is reported as FAILED rather than scanned against a
+    # truncated policy: reduce its rules or shorten their descriptions. Raising
+    # the cap means raising vllm.maxModelLen to match — rules too long for the
+    # context are the one overflow that splitting the text cannot rescue.
+    #
+    # The cap counts CHARACTERS and the model's limit is in TOKENS, and dense
+    # CJK costs about five times more tokens per character than Latin, so a
+    # policy authored in Chinese can pass this cap and still not fit. That case
+    # is caught by a PRE-FLIGHT: when a script-aware estimate says the rules
+    # might not fit, the scanner asks the server once (a one-character text
+    # under the full rules) before cutting any window, and fails the detector
+    # with the rules named. One call, and the server's own refusal is the
+    # authority, so the estimate can never fail a detector that works. The
+    # context it believes is on the "policyGuard model endpoint ready" line
+    # (from /v1/models, or POLICYGUARD_CONTEXT_TOKENS, or an assumed 16384).
+    resources:
+      limits:
+        cpu: "5000m"
+        memory: "2Gi"
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+
 # Triton Inference Server Configuration
-# REQUIRED: Serves all 5 security models on a single GPU with dynamic batching and rate limiting
+# REQUIRED: serves the DLP model on the GPU with dynamic batching.
 # Scanners depend on Triton for inference (thick client, thin server architecture)
 triton:
+  image:
+    serverTag: "25.11-onnx-trt-agt-rpt-s1"
+    modelsTag: "0.0.4-s1"
   replicas: 1
 
-  # These images use independent tags from the FortiAIGate application images.
-  # Terraform sets them from triton_image_tag and triton_models_image_tag.
-  image:
-    serverTag: "25.11-onnx-trt-agt-s1"
-    modelsTag: "0.1.6-s1"
+  # Instances of the DLP model Triton runs on EACH of its GPUs. They run at
+  # the same time, so while one is between batches another keeps the GPU
+  # working. Raise it when DLP scans queue under load, and judge the result by
+  # DLP throughput, not GPU utilization, which reads high well before the
+  # card is full. Suggested:
+  #   - 3 on an NVIDIA RTX PRO 6000 (96 GB) or a GPU of similar power, tested
+  #     sharing the card with vLLM.
+  # Every instance:
+  #   - holds its own copy of the model: up to about 3 GiB of GPU memory, and
+  #     more host memory against resources.limits.memory below. On a card
+  #     shared with vLLM, Triton has only the part vLLM leaves free
+  #     (1 - vllm.gpuMemoryUtilization): room for 1 on a 24 GB card.
+  #   - keeps about one CPU core busy while it runs. Keep
+  #     resources.limits.cpu below at least (instances x gpuCount) + 1 cores,
+  #     or CPU throttling leaves the GPU idle. The default limits cover 3 on
+  #     one card.
+  # Start-up is slower with more instances: each loads its own TensorRT
+  # engine after the first one builds it.
+  dlpInstancesPerGpu: 1
+
+  # Triton verbose logging: 0 = off. 1 logs every inference request, several
+  # lines each, which costs throughput under load. For troubleshooting only.
+  logVerbose: 0
 
   resources:
     limits:
-      cpu: 2000m
+      cpu: 5000m
       memory: 25Gi
+      # Cards per Triton pod. Triton runs dlpInstancesPerGpu instances of the
+      # model on each card, so 2 doubles DLP throughput in one pod — but a
+      # RollingUpdate then needs 2 spare cards for the surge pod; prefer more
+      # replicas at gpuCount 1, or fortiaigate.updateStrategy: Recreate. Every
+      # card counts for the licence.
       gpuCount: 1
       gpuResourceName: "nvidia.com/gpu"  # Can be overridden for MIG: nvidia.com/mig-3g.40gb
     requests:
       cpu: 1000m
       memory: 12Gi
 
-# Scanner Configuration - All AI-based scanners
-# Note: Scanners run as CPU-only clients that connect to Triton server
-# Scanners handle tokenization and chunking, Triton handles inference
-scanners:
-  # Global scanner environment variables
-  env:
-    # Maximum number of characters to scan per request.
-    # Content exceeding this limit will be truncated before scanning.
-    # Increasing maxScanChars requires more memory and CPU resources.
-    # Tune this value based on your system's capacity and performance requirements.
-    # NOTE: System hard limit is 1,500,000 characters. Values above this
-    # will be automatically capped at the maximum.
-    maxScanChars: "5000"
+# policyGuard vLLM server: the model behind Natural Language (POLICY)
+# detectors. It runs when fortiaigate.gpu.enabled is true and replicas is 1,
+# and needs a GPU of compute capability 8.0 or higher. There is no separate
+# `enabled` flag. Where it runs is gpuAttach below: inside the Triton pods on
+# Triton's card (shared; those pods are then named triton-vllm-server-...),
+# or in pods of its own (dedicated).
+#
+# WHEN IT DOES NOT RUN, POLICY SCANNING FAILS CLOSED: every Natural Language
+# detector is reported as failed and the gateway answers 503. Rules are never
+# reported as enforced while nothing evaluates them. DLP and REGEX detectors
+# are unaffected — to run without policyGuard, remove Natural Language
+# detectors from the policies in use.
+vllm:
+  image:
+    tag: "0.28.0-rpt-s1"
+  # 0 turns vLLM off. In shared mode (below) vLLM runs inside every
+  # Triton pod (named triton-vllm-server-... there), so the number of
+  # policyGuards is triton.replicas and this only switches it on (1) or off
+  # (0). In dedicated mode it is the number of standalone vllm-server
+  # pods, each needing gpuCount cards of its own.
+  replicas: 1
 
-  # Default resource requests and limits for all scanners
-  defaultResources:
+  # Defaults match the supplied release. Change inference tags only as a
+  # qualified release set; the model carrier is shared with Triton.
+
+  # Fraction of each GPU vLLM may use, weights included. Empty (the default)
+  # follows the attachment mode below: 0.85 on a card of its own, 0.80 when it
+  # shares the card with Triton (which takes about 3 GiB of it for each of its
+  # triton.dlpInstancesPerGpu instances). The model
+  # takes about 16.6 GiB before any KV cache, so on a 24 GB card that leaves
+  # ~2.5 GiB or ~1.4 GiB of KV cache. Set a number to override — for a
+  # time-sliced cluster the chart cannot recognise, for instance.
+  #
+  # Set too low, vLLM does not start: it needs room for the weights AND for at
+  # least one request of maxModelLen tokens.
+  gpuMemoryUtilization: ""
+
+  # Largest prompt one scan may send the model, in tokens (a detector's rules,
+  # the content being scanned, and the verdict). It is a ceiling, not a window
+  # size: the policyGuard window is set in characters above
+  # (POLICYGUARD_CHUNK_CHARS beside POLICYGUARD_MAX_RULE_DEFINITION_CHARS) and
+  # nothing re-measures the pair at scan time, so re-check them together
+  # whenever either number moves.
+  #
+  # It does not size the KV cache — gpuMemoryUtilization above does — so
+  # raising it costs no extra memory, but vLLM will not start unless the cache
+  # can hold one request of this length. Lowering it does not shrink the window
+  # on its own — it makes the server refuse more of them, and a refused window
+  # is halved and re-judged at the cost of extra model calls — so lower
+  # POLICYGUARD_CHUNK_CHARS with it.
+  #
+  # Empty (or 0) uses the model's own maximum, which needs a GPU large enough
+  # to hold one request that long.
+  maxModelLen: 16384
+
+  # How vLLM gets its GPU — one of three:
+  #   auto (default): decided at install or upgrade from the cluster's nodes.
+  #     With enough GPUs left over after triton-server for replicas x gpuCount,
+  #     vLLM gets GPUs of its own (dedicated); otherwise it shares Triton's
+  #     (shared). The chart's notes print the outcome. Needs permission to
+  #     list nodes; rendered offline it assumes shared.
+  #   shared: vLLM shares Triton's GPU — one Triton, one vLLM, one card, no
+  #     extra licence, no cluster-level change (no time-slicing, MIG or MPS).
+  #     Implemented as co-location: vLLM runs as a second container inside
+  #     every Triton pod, on the card the kubelet gave Triton, so the pairing
+  #     is guaranteed rather than discovered. The Deployment is then
+  #     triton-vllm-server (pods triton-vllm-server-..., READY 2/2, label
+  #     app=triton-vllm-server) instead of triton-server, so the pod list says
+  #     which pods carry both engines; the Service names do not change.
+  #     triton.replicas sets how many of each; both engines restart together
+  #     when either's image or arguments change. Needs the NVIDIA container
+  #     runtime as containerd's default, accepting NVIDIA_VISIBLE_DEVICES from
+  #     unprivileged containers (the toolkit default), and triton.replicas of
+  #     1 or more. Host memory per Triton pod grows by this block's resources
+  #     below. The right mode for the common single-GPU deployment.
+  #   dedicated: vLLM gets GPUs of its own — standalone vllm-server pods, each
+  #     requesting gpuCount whole GPUs (resources.limits below) through the
+  #     device plugin exactly as triton-server does, so the two engines land
+  #     on different cards. For a deployment with more GPUs than Triton uses.
+  #     On a node with no spare card the pod stays Pending.
+  #   The earlier spellings — colocated and shared-runtime (both now shared),
+  #   device-plugin (now dedicated) — are refused at render time, as is the
+  #   retired sharedGpuDevices pin: in shared mode the card is Triton's by
+  #   construction, there is nothing to pin.
+  #
+  # Neither mode limits VRAM; gpuMemoryUtilization above is vLLM's budget.
+  gpuAttach: auto
+
+  # Extra `vllm serve` arguments.
+  #
+  # --max-num-seqs caps how many requests the server batches at once.
+  #
+  # --enable-prefix-caching PINS WHAT THE POLICY SCANNER ALREADY ASSUMES. A
+  # detector's system prompt (its rendered rules, up to ~9.4k tokens) is
+  # byte-identical for every window of every request that uses that detector,
+  # and policy-guard is written around that prefill being paid once rather than
+  # per window: see "so vLLM's prefix cache holds it after the first call" in
+  # guardrail/scanner/backend/policyguard/policyguard.go. Since 2026-09-30 it
+  # also carries the CONVERSATION across requests: policy-guard judges the
+  # system text, turns, tool calls and tool results as one combined text that
+  # grows by appending, so each request's windows repeat or extend the last
+  # one's, and only the new tail should be prefilled. vLLM's V1 engine
+  # enables it by default, so this changes nothing today. It is here so that a
+  # default flipping on an engine bump fails LOUDLY, at a chart line somebody
+  # edited, instead of silently as a latency regression nobody can source.
+  # Both polarities are in 0.28's own engine arguments (CacheConfig:
+  # --enable-prefix-caching / --no-enable-prefix-caching), so the flag is
+  # accepted by the pinned image rather than crash-looping it.
+  #
+  # It is NOT the scanner's own verdict cache (cache.go), which keys on the
+  # rules AND a tool definition's whole text, answers only exact repeats, and
+  # serves the tool list alone. The two cover disjoint texts: the tool list is that one's, the
+  # conversation and the response are this one's — repeats included.
+  #
+  # Whether it is actually HITTING is a pod-side question, not a chart one
+  # ($POD is a triton-vllm-server pod in shared mode, a vllm-server pod in
+  # dedicated mode; vLLM listens on 8100 in both):
+  #   kubectl -n fortiaigate exec $POD -c vllm -- \
+  #     curl -s localhost:8100/metrics | grep prefix_cache
+  extraArgs: ["--max-num-seqs=64", "--enable-prefix-caching"]
+
+  # vLLM request logging, the counterpart of triton.logVerbose. 0 = off (the
+  # default): start-up, model load, warnings, errors and the engine's periodic
+  # throughput line under load still print, but nothing per request. 1 = every
+  # request, as Triton's 1 does: the HTTP access line (which also lists every
+  # /health probe, several a minute), a "Received request" line with the
+  # sampling parameters, and a "Generated response" line with the model's
+  # verdict text and finish reason. The prompt text is logged at neither
+  # level (vLLM prints it only at its DEBUG logger level, which the chart does
+  # not set). For troubleshooting only: it costs throughput under load, and
+  # "--max-log-len=N" in extraArgs above caps the logged verdict if needed.
+  # Changing this restarts the pod (both engines in shared mode).
+  logVerbose: 0
+
+  # Model volume holds the served model; cache volume holds compilation
+  # artifacts, so restarts skip the warm-up.
+  modelVolumeSizeLimit: 20Gi
+  cacheVolumeSizeLimit: 10Gi
+
+  resources:
     limits:
-      cpu: 2000m
-      memory: 2Gi
+      cpu: 4000m
+      # Sized for the LOAD WINDOW, not steady state. The model ships
+      # encrypted and the serving container decrypts it into memory (sealed
+      # memfds; nothing on disk), so until vLLM reports healthy the pod holds
+      # the whole checkpoint in RAM beside vLLM's own footprint: ~13.8 GiB of
+      # weights + ~3.5 GiB of vLLM for the pinned faig-models tag, ~17.5 GiB.
+      # That memory is released at the first healthy answer, after which the
+      # pod is back to vLLM alone. A limit below that peak is an OOMKilled
+      # pod in a crash loop that never reaches Ready — raise it with the
+      # model: model size + 5 GiB, rounded up.
+      memory: 24Gi
+      # Cards per vLLM pod when it has cards of its own (dedicated, or
+      # auto resolving to it). More than 1 runs the model tensor-parallel
+      # across them: more KV cache per card and faster calls, on identical
+      # cards. Every card counts for the licence. Override gpuResourceName for
+      # MIG, e.g. nvidia.com/mig-3g.40gb. Not used in shared mode, where
+      # vLLM attaches every card of its Triton pod (triton gpuCount).
+      gpuCount: 1
+      gpuResourceName: "nvidia.com/gpu"
     requests:
       cpu: 1000m
-      memory: 1Gi
-  # To override resources for a specific scanner, add a 'resources' block under that scanner.
-  # Example:
-  # code:
-  #   replicas: 1
-  #   resources:
-  #     limits:
-  #       cpu: 500m
-  #       memory: 512Mi
-  #     requests:
-  #       cpu: 250m
-  #       memory: 256Mi
-
-  language:
-    replicas: 1
-    env: {}
-    # resources:
-    #   limits:
-    #     cpu: 500m
-    #     memory: 512Mi
-    #   requests:
-    #     cpu: 250m
-    #     memory: 256Mi
-
-  code:
-    replicas: 1
-    env: {}
-    # resources:
-    #   limits:
-    #     cpu: 500m
-    #     memory: 512Mi
-    #   requests:
-    #     cpu: 250m
-    #     memory: 256Mi
-
-  promptinjection:
-    replicas: 1
-    # Environment variables for promptinjection scanner
-    env:
-      # CHUNK_OVERLAP_SIZE is limited to a maximum of half the CHUNK_SIZE. Values exceeding this limit will be adjusted automatically.
-      CHUNK_SIZE: "512"
-      CHUNK_OVERLAP_SIZE: "256"
-    # resources:
-    #   limits:
-    #     cpu: 500m
-    #     memory: 512Mi
-    #   requests:
-    #     cpu: 250m
-    #     memory: 256Mi
-
-  sensitive:
-    replicas: 1
-    env:
-      CHUNK_SIZE: 256
-      CHUNK_OVERLAP_SIZE: 64
-    resources:
-      limits:
-        cpu: 2000m
-        memory: 10Gi
-      requests:
-        cpu: 1000m
-        memory: 6Gi
-
-  toxicity:
-    replicas: 1
-    # Environment variables for Toxicity scanner
-    env:
-      CHUNK_SIZE: "512"
-      CHUNK_OVERLAP_SIZE: "256"
-    # resources:
-    #   limits:
-    #     cpu: 1000m
-    #     memory: 1Gi
-    #   requests:
-    #     cpu: 250m
-    #     memory: 256Mi
-
-  anonymize:
-    replicas: 1
-    env:
-      CHUNK_SIZE: 256
-      CHUNK_OVERLAP_SIZE: 64
-    resources:
-      limits:
-        cpu: 2000m
-        memory: 15Gi
-      requests:
-        cpu: 1000m
-        memory: 6Gi
-
-  deanonymize:
-    replicas: 1
-    env: {}
-    # resources:
-    #   limits:
-    #     cpu: 500m
-    #     memory: 512Mi
-    #   requests:
-    #     cpu: 250m
-    #     memory: 256Mi
-
-  customrule:
-    replicas: 1
-    env: {}
-    # resources:
-    #   limits:
-    #     cpu: 500m
-    #     memory: 512Mi
-    #   requests:
-    #     cpu: 250m
-    #     memory: 256Mi
-
-# License ConfigMap. Terraform sets license.existingConfigMap to the name of
-# the ConfigMap it creates from var.licenses (see licenses.tf). When the
-# chart is rendered standalone (helm template / helm lint), the empty default
-# below causes templates/license.yaml to render an in-chart ConfigMap from
-# global.licenses instead.
-license:
-  existingConfigMap: ""
-  # Digest of the license contents. The ConfigMap is not part of the pod spec, so
-  # changing a license file would otherwise leave license-manager running on the
-  # old one; a new value here rolls the DaemonSet. Terraform sets it from
-  # var.licenses. Empty = no annotation (standalone/EKS renders are unchanged).
-  checksum: ""
+      memory: 8Gi
 
 license_manager:
-  placement:
-    nodeSelector: {}
-    tolerations: []
-
+  # Two replicas. One is elected leader and does the write side — FortiGuard
+  # polling, GPU metering, publishing the licence snapshot; both answer reads,
+  # so a failover is invisible to callers. Anti-affinity is preferred rather
+  # than required, so both still schedule on a single-node cluster.
+  replicas: 2
   resources:
     limits:
       cpu: 500m
@@ -287,6 +625,12 @@ license_manager:
     requests:
       cpu: 250m
       memory: 256Mi
+  proxy:
+    enabled: false
+    ipAddress: ""
+    port: 1080
+    username: ""
+    password: ""
 
 # LogD Service Configuration
 logd:
@@ -294,11 +638,11 @@ logd:
 
   resources:
     limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
       cpu: 500m
       memory: 512Mi
-    requests:
-      cpu: 250m
-      memory: 256Mi
 
 # Storage Configuration
 storage:
@@ -316,6 +660,16 @@ storage:
   # Use existing PV name (leave empty for auto-creation)
   # When specified, creates a PVC that binds to the existing PV
   existingPvName: ""
+
+# SSO (SAML 2.0)
+sso:
+  # The deployment's PUBLIC base URL — what the browser and the identity
+  # provider reach this deployment on (scheme + host, no path). It seeds the
+  # SP entity ID / ACS URL prefill on the admin Authentication page; the value
+  # the ACS actually validates against is the one the admin confirms there.
+  # Empty: falls back to https://<ingress.host> when that is set, else the
+  # server guesses from request headers and the UI asks the admin to confirm.
+  externalUrl: ""
 
 # Ingress Configuration
 ingress:
@@ -342,31 +696,47 @@ tls:
   # TLS mount path in containers
   mountPath: "/etc/tls"
 
-  # When true, annotate the core/api/webui Deployments for Stakater Reloader so
-  # they roll automatically whenever the TLS secret changes (cert-manager
-  # renewal or a staging->production flip). Without it, pods read the cert once
-  # at startup and keep serving the old one until manually restarted. Off by
-  # default; the AKS Terraform root turns it on (and installs the Reloader
-  # controller) only in Let's Encrypt mode, where the secret content changes
-  # out-of-band from any helm apply. Self-signed mode doesn't need it (the cert
-  # exists at apply time, so the checksum-based roll already works).
+  # Existing external secrets take precedence over chart certificate files.
+  existingSecret: ""
+  existingSecretChecksum: ""
+  internalExistingSecret: ""
+  internalExistingSecretChecksum: ""
+  internalMountPath: "/etc/internal-tls"
   reloaderEnabled: false
 
   # Certificate data (used to create secrets)
   # You need to provide your own certificate and key
-  cert: files/certificate/dflt.crt
-  key: files/certificate/dflt.key
-  existingSecret: ""
-  existingSecretChecksum: ""
+  cert: ""
+  key: ""
 
-  # Optional separate secret for scanners, logd, license-manager, and databases.
-  # Empty preserves the shared-secret behavior for standalone Helm installs.
-  # Both secrets need tls.crt/tls.key; the separate internal secret needs ca.crt.
-  # Also set postgresql.tls.certificatesSecret and redis.tls.existingSecret to
-  # this name, and redis.tls.certCAFilename to ca.crt (Terraform does this).
-  internalExistingSecret: ""
-  internalExistingSecretChecksum: ""
-  internalMountPath: "/etc/internal-tls"
+# DP Agent Configuration (8.0.2)
+# The data-plane management interface & single writer of management state.
+# Flag-gated OFF by default: enabling it deploys the agent but nothing routes
+# through it until the API is cut over. Step 5 tunnel
+# settings are present but dark (controller.enabled=false).
+dpAgent:
+  enabled: false
+  replicas: 2            # ≥2, stateless, no leader election for DataService
+  runMigrations: true    # goose Up() at startup (advisory-locked; safe across replicas)
+  postgresSslMode: require
+  # Existing Secret (key "master-key") holding the master key that seals
+  # credential secrets at rest. Empty = fall back to
+  # api.masterKeyExistingSecret, then to the chart-generated Secret (see that
+  # field's comment above and templates/master-key-secret.yaml) — dpAgent is
+  # dark by default today, but when it runs it must decrypt what the API wrote,
+  # so it needs to land on that exact same fallback chain, not its own.
+  masterKeyExistingSecret: ""
+  managementMode: both       # local | controller | both
+  logDetailExport: metadata_only  # allow | metadata_only | deny
+  controller:
+    enabled: false       # step 5 ControlTunnel — dark by default
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi
 
 # PostgreSQL Configuration
 # For advanced configuration options, refer to:
@@ -395,7 +765,7 @@ postgresql:
     # Prefer server ciphers
     preferServerCiphers: true
 
-  # Enable volumePermissions for TLS support and Azure Disk ownership setup.
+  # Enable volumePermissions for tls support
   volumePermissions:
     enabled: true
     image:
@@ -452,6 +822,27 @@ redis:
     certCAFilename: "tls.crt"
     # Disable client authentication (mutual TLS)
     authClients: false
+
+  # Redis configuration. Keep all four lines: this block replaces the Redis
+  # sub-chart's defaults entirely, so removing appendonly/save turns persistence
+  # off. Redis retains application/session state; build0047 licensing uses
+  # PostgreSQL independently of Redis.
+  #
+  # maxmemory must stay BELOW master.resources.limits.memory below, with room to
+  # spare (1200mb against 2Gi): background saves need extra memory, and a Redis
+  # that reaches the container limit is killed rather than slowed. Raise both
+  # together if you raise either.
+  #
+  # noeviction means Redis refuses new writes when full instead of discarding
+  # data it already holds. Do not change it to an eviction policy — those would
+  # drop session state to make room for traffic logs.
+  commonConfiguration: |-
+    # Enable AOF https://redis.io/topics/persistence#append-only-file
+    appendonly yes
+    # Disable RDB persistence, AOF persistence already enabled.
+    save ""
+    maxmemory 1200mb
+    maxmemory-policy noeviction
 
   master:
     persistence:

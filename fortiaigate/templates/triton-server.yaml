@@ -1,12 +1,92 @@
-{{- if .Values.fortiaigate.gpu.enabled }}
 # Triton Inference Server Deployment with Repository Agent
-# Serves all 5 security models with GPU acceleration, dynamic batching, and rate limiting
+#
+# PII (DLP) ONLY for now. The model carrier is the combined faig-models image,
+# which ships exactly two things: the encrypted sensitive_model ONNX for Triton
+# and the encrypted policyGuard HF directory for vLLM (the vllm-model-loader of
+# _vllm.tpl copies that one; this loader must not). prompt_injection /
+# toxicity / language / code are NOT in that image, so their config.pbtxt
+# entries are gone from the ConfigMap below too — a config with no model makes
+# Triton fail the load. Consequence: every scanner except DLP has no backend
+# on this deployment. GPU acceleration and dynamic batching are unchanged.
+#
+# CO-LOCATED policyGuard: vllm.gpuAttach "shared", which is implemented as
+# co-location (and is what "auto" resolves to on a deployment with no spare
+# card — vllm-server.yaml's header has the mode
+# table). This pod then also carries the policyGuard vLLM server, on the SAME
+# card as Triton, with no second licence and nothing to discover. The
+# Deployment, the pods' name prefix AND the pods' `app` label are
+# triton-vllm-server in that mode and triton-server otherwise
+# (fortiaigate.tritonName, _vllm.tpl), so `kubectl get pods` says which pods
+# carry both engines and `-l app=triton-vllm-server` selects exactly them;
+# the two Triton Services below select on the same value. Their NAMES stay
+# (triton-server, triton-server-metering): addresses the DLP scanner and the
+# metering dial. Logs are per container: `-c triton`, `-c vllm`,
+# `-c gpu-probe`, or `--all-containers --prefix` for all of them tagged.
+# The pod:
+#
+#   initContainers
+#     gpu-probe          requests the pod's gpuCount x nvidia.com/gpu — the
+#                        SAME resource and count as the triton container
+#                        below. The kubelet allocates it a card; the probe
+#                        reads the UUID through the runtime-injected
+#                        nvidia-smi (never NVIDIA_VISIBLE_DEVICES, which the
+#                        runtime rewrites to `void` once it has injected) and
+#                        PATCHes it onto this pod as the annotation
+#                        fortiaigate.io/gpu-device; settles 5 s; exits.
+#     model-loader       Triton's model (unchanged)
+#     vllm-model-loader  vLLM's model, from the same carrier (_vllm.tpl)
+#   containers
+#     triton             requests gpuCount x nvidia.com/gpu -> the kubelet
+#                        REUSES the probe's allocation: the device manager
+#                        hands the devices a finished (non-restartable) init
+#                        container held to the app containers of the same pod
+#                        that request the same resource, before it allocates
+#                        anything new. Verified on the lab (design doc § 9).
+#     vllm               requests NO GPU; NVIDIA_VISIBLE_DEVICES comes from
+#                        the annotation through the downward API, so the
+#                        NVIDIA container runtime attaches exactly Triton's
+#                        card. Its own ports (8100, reporter 9110), no
+#                        readiness probe (_vllm.tpl explains both).
+#
+# The pod's effective GPU request is max(largest init, sum of app containers)
+# = gpuCount: one allocation, not two. Triton's own behaviour is unchanged in
+# every mode; what shared mode adds is gated on $colocated below. The probe
+# needs pods get+patch on its own namespace (Role below), and its token is
+# mounted into the probe ONLY — never into an engine. The script
+# (files/gpu-probe.py) is hashed into the pod template as checksum/gpu-probe
+# so a chart upgrade that changes it rolls the pod (Mantis 1348131's lesson).
+# Design and lab verification: docs/8.0.2/gpu-assignment-triton-vllm-design.md.
+#
+# sensitive_model is the MULTILINGUAL DLP model: a GLiNER fixed_head export on
+# an xlm-roberta-large backbone, FP16 ONNX (~1.1 GB), replacing the English
+# DeBERTa-v3 export. Two things are coupled to that backbone and must move
+# together with the faig-models tag (fortiaigate.modelsImage, _vllm.tpl):
+#   - the dlp-scanner's tokenizer bundle, guardrail/scanner/models/dlp/onnx/:
+#     the stock XLM-R tokenizer (250002-token vocab, <s>/</s> frame tokens —
+#     gliner.go probes for them, so no code change per backbone), NOT the
+#     DeBERTa one (128k vocab, [CLS]/[SEP]). A mismatched tokenizer loads fine
+#     and silently scores garbage.
+#   - the request contract in the ConfigMap below. The current export is the
+#     converter's GRAPH V2 (convert_triton_trt/convert_gliner_trt.py --graph v2):
+#     three inputs, no span_idx, and a SYMBOLIC logits words axis (-1). The
+#     graph-v1 export had span_idx and a concrete 512 there. Paste the
+#     config.pbtxt the converter wrote for the shipped export; never edit the
+#     dims by hand (see the comment on `dims` below).
+{{- $colocated := false }}
+{{- if include "fortiaigate.vllmEnabled" . }}
+{{- $plan := include "fortiaigate.vllmGpuPlan" . | fromJson }}
+{{- $colocated = eq $plan.mode "shared" }}
+{{- end }}
+{{- $tritonGpuCount := int (dig "resources" "limits" "gpuCount" 1 .Values.triton) }}
+{{- $tritonGpuResource := dig "resources" "limits" "gpuResourceName" "nvidia.com/gpu" .Values.triton }}
+{{- $gpuAnnotation := include "fortiaigate.gpuDeviceAnnotation" . }}
+{{- $name := include "fortiaigate.tritonName" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: triton-server
+  name: {{ $name }}
   labels:
-    app: triton-server 
+    app: {{ $name }}
     app.kubernetes.io/name: fortiaigate
     app.kubernetes.io/part-of: fortiaigate-platform
     app.kubernetes.io/managed-by: helm
@@ -16,70 +96,161 @@ spec:
     type: {{ .Values.fortiaigate.updateStrategy }}
   selector:
     matchLabels:
-      app: triton-server
+      app: {{ $name }}
   template:
     metadata:
       labels:
-        app: triton-server
+        app: {{ $name }}
+        {{- if $colocated }}
+        # The vLLM Services select this key (_vllm.tpl): a pod has one app
+        # label, and this pod's is the Deployment's name (above).
+        {{ include "fortiaigate.policyGuardLabelKey" . }}: "true"
+        {{- end }}
         app.kubernetes.io/name: fortiaigate
         app.kubernetes.io/part-of: fortiaigate-platform
         app.kubernetes.io/managed-by: helm
+      annotations:
+        # Triton reads the model config only when it starts, so a change to it
+        # (triton.dlpInstancesPerGpu, for one) must restart the pod to apply.
+        checksum/model-config: {{ include "fortiaigate.tritonDlpModelConfig" . | sha256sum }}
+        {{- if $colocated }}
+        # gpu-probe runs ONCE, at pod start, from the script the
+        # triton-vllm-server-gpu-probe ConfigMap carries. The kubelet refreshes a
+        # mounted ConfigMap in place but never re-runs a finished
+        # initContainer, so a chart upgrade that changed only the script would
+        # leave the running pod on the old one with no rollout. Hashing it
+        # here makes that upgrade a rollout (Mantis 1348131). The card
+        # annotation itself (fortiaigate.io/gpu-device) is deliberately NOT in
+        # the template: the probe writes it on the live pod.
+        checksum/gpu-probe: {{ include "fortiaigate.gpuProbeScript" . | sha256sum }}
+        {{- end }}
     spec:
-      {{- if .Values.global.licenses }}
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      {{- keys .Values.global.licenses | toYaml | nindent 22 }}
-      {{- end }}
-      {{- with .Values.fortiaigate.gpuWorkloadPlacement.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.fortiaigate.gpuWorkloadPlacement.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+      {{- include "fortiaigate.gpuPlacement" . | nindent 6 }}
+      # ALWAYS named, never omitted (the API server refills a dropped
+      # serviceAccountName from the deprecated serviceAccount field, so an
+      # upgrade that deleted the account would leave no pod creatable):
+      # the Deployment's own name (triton-vllm-server), which may get+patch
+      # pods (Role below), when the gpu-probe runs; "default" otherwise. No
+      # container gets a token automatically — the probe mounts its own
+      # (kube-api-access below), the engines never talk to the API server.
+      serviceAccountName: {{ if $colocated }}{{ $name }}{{ else }}default{{ end }}
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: false  # Triton container runs as root
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-      - name: model-loader
-        image: {{ .Values.fortiaigate.image.repository }}/triton-models:{{ .Values.triton.image.modelsTag }}
+      {{- if $colocated }}
+      # Which card this pod holds (header). FIRST, before the model copies: it
+      # takes seconds, and a refusal (no card visible, a denied patch) shows
+      # as Init:Error on the first init with the reason as its termination
+      # message, not after tens of seconds of copying. A PLAIN init container
+      # on purpose — the kubelet reuses a restartable (sidecar) init's devices
+      # for nothing. Same image as the vllm container (one pin; python3 for
+      # the API call, nvidia-smi injected by the runtime for the `utility`
+      # capability), -S so the image's .pth starts no licence reporter in a
+      # process whose card Triton is about to take over.
+      - name: gpu-probe
+        image: {{ include "fortiaigate.vllmImage" . }}
         imagePullPolicy: {{ .Values.fortiaigate.image.pullPolicy }}
-        command: ['sh', '-c', 'cp -r /models/* /shared-models/ && echo "Models copied successfully"']
+        command: ["python3", "-S", "/opt/faig/gpu-probe/gpu-probe.py"]
+        # The script writes its own message when it refuses; this makes its
+        # other failures (a traceback) show in `kubectl describe pod` too,
+        # from the tail of its log.
+        terminationMessagePolicy: FallbackToLogsOnError
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        - name: GPU_ANNOTATION
+          value: {{ $gpuAnnotation | quote }}
+        # The count the triton container asks for: more cards visible than
+        # that is a refusal (one would be a card Triton does not hold).
+        - name: GPU_PROBE_EXPECT_COUNT
+          value: {{ $tritonGpuCount | quote }}
+        - name: GPU_PROBE_RESOURCE
+          value: {{ $tritonGpuResource | quote }}
+        - name: GPU_PROBE_SETTLE
+          value: "5"
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: utility
+        resources:
+          limits:
+            # THE SAME resource name and count as the triton container: that
+            # is what the kubelet matches when it hands this allocation on.
+            {{ $tritonGpuResource }}: {{ $tritonGpuCount }}
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        volumeMounts:
+        - name: gpu-probe
+          mountPath: /opt/faig/gpu-probe
+          readOnly: true
+        - name: kube-api-access
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      {{- end }}
+      - name: model-loader
+        image: {{ include "fortiaigate.modelsImage" . }}
+        imagePullPolicy: {{ .Values.fortiaigate.image.pullPolicy }}
+        # Named subtree, never /models/* — the same image also carries
+        # /models/policyguard/ (the vLLM model), which is not a Triton model and
+        # would fail the repository load.
+        command: ['sh', '-c', 'cp -r /models/sensitive_model /shared-models/ && echo "PII model copied successfully"']
         volumeMounts:
         - name: model-repository
           mountPath: /shared-models
+      {{- if $colocated }}
+      {{- include "fortiaigate.vllmModelLoader" . | nindent 6 }}
+      {{- end }}
       containers:
       - name: triton
         image: {{ .Values.fortiaigate.image.repository }}/custom-triton:{{ .Values.triton.image.serverTag }}
         imagePullPolicy: {{ .Values.fortiaigate.image.pullPolicy }}
-        command:
+        # NO `command:` — DELIBERATELY. The image's entrypoint starts the GPU
+        # licence reporter beside tritonserver and then execs these args
+        # (modules/triton-server/runtime-entrypoint.sh).
+        #
+        # This block used to be `command: ["/bin/sh","-c"]` with every flag
+        # below inlined into one shell string, purely so a background process
+        # could be started here. That put the engine's whole command line into a
+        # string where a typo is a dead engine — and it made the reporter a
+        # property of this manifest rather than of the image, so it had to be
+        # copied into every other way the image might be run.
+        #
+        # Setting `command:` here again would REPLACE the entrypoint and
+        # silently stop the reporter. It is not needed: everything the engine
+        # takes is an argument, and arguments go below.
+        #
+        # An image WITHOUT the wrapper still works: NVIDIA's own entrypoint
+        # execs its arguments, so these reach tritonserver either way. That is
+        # what lets the chart be correct both before and after the reporter
+        # image is published.
+        args:
           - tritonserver
           - --model-repository=/models
-          - --rate-limit-resource=gpu_slots:100
           - --grpc-port=8001
           - --http-port=8000
           - --metrics-port=8002
-          - --log-verbose=1
+          - --log-verbose={{ int (.Values.triton.logVerbose | default 0) }}
           # gRPC connection management for load balancing
           - --grpc-keepalive-time=30000
           - --grpc-keepalive-timeout=5000
           - --grpc-max-connection-age=900000
           - --grpc-max-connection-age-grace=600000
-          # HTTP/2 ping configuration to prevent "too_many_pings" errors
-          # These are GLOBAL server settings that apply to ALL connections:
-          # - max-pings-without-data: Controls how many pings SERVER can send to clients (not client->server)
-          # - min-recv-ping-interval: Minimum interval between pings SERVER expects to receive from clients
-          # - max-ping-strikes: Maximum "bad pings" server tolerates per connection before closing it
-          # Set to 0 to disable limits and prevent "too_many_pings" errors when multiple scanners connect
+          # HTTP/2 ping configuration to prevent "too_many_pings" errors.
+          # GLOBAL server settings applying to ALL connections; 0 disables the
+          # limits so multiple scanners can connect without being struck.
           - --grpc-http2-max-pings-without-data=0
           - --grpc-http2-min-recv-ping-interval-without-data=10000
           - --grpc-http2-max-ping-strikes=0
@@ -93,9 +264,42 @@ spec:
         - containerPort: 8002
           name: metrics
           protocol: TCP
+        - containerPort: 9109
+          name: gpu-meter
+          protocol: TCP
         env:
-        - name: CUDA_VISIBLE_DEVICES
-          value: "0"
+        # No CUDA_VISIBLE_DEVICES pin: the device plugin already narrows the
+        # container to the cards it was allocated, and Triton starts one
+        # instance of each model per card it sees — so gpuCount 2 is two
+        # cards working, not one working and one held idle.
+        # WHICH MACHINE this engine's cards are in, from the pod's own downward
+        # API. Diagnostics an operator can act on, never identity: the licence
+        # dedups on card uuid alone, and an engine that was never told its node
+        # still reports cards that still count.
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        - name: AIGATE_PRODUCT
+          value: "triton"
+        # The reporter's /ready asks the ENGINE whether it is serving, so the
+        # readiness probe below can point at one endpoint and mean both. It
+        # checks LOCAL facts only and never reaches the licence manager — an LM
+        # outage turning every engine pod NotReady would be a total outage
+        # caused by licensing.
+        - name: AIGATE_ENGINE_HEALTH
+          value: "http://127.0.0.1:8000/v2/health/ready"
         resources:
           {{- $finalResources := .Values.triton.resources }}
           {{- $gpuEnabled := .Values.fortiaigate.gpu.enabled }}
@@ -115,19 +319,26 @@ spec:
         - name: model-repository
           mountPath: /models
         - name: model-configs
-          mountPath: /models/prompt_injection_model/config.pbtxt
-          subPath: prompt_injection_model-config.pbtxt
-        - name: model-configs
-          mountPath: /models/toxicity_model/config.pbtxt
-          subPath: toxicity_model-config.pbtxt
-        - name: model-configs
           mountPath: /models/sensitive_model/config.pbtxt
           subPath: sensitive_model-config.pbtxt
-        - name: model-configs
-          mountPath: /models/language_model/config.pbtxt
-          subPath: language_model-config.pbtxt
         - name: shm-memory
           mountPath: /dev/shm
+        # Building the FP16 TensorRT engine for the ~1.1 GB sensitive_model
+        # (GLiNER on xlm-roberta-large; 15-25 min was measured on the earlier
+        # 1.8 GB DeBERTa export, and this one is of the same order) can take
+        # that long on first boot, and Triton does not open
+        # its HTTP health port until ALL models finish loading. Without a
+        # startupProbe, liveness/readiness begin at ~60s and kill the container
+        # at ~210s (60 + 15x10) mid-build. The startupProbe suspends
+        # liveness/readiness until the server is up, giving the engine build a
+        # 30-minute window (120 x 15s) to complete.
+        startupProbe:
+          httpGet:
+            path: /v2/health/ready
+            port: 8000
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 120
         livenessProbe:
           httpGet:
             path: /v2/health/live
@@ -136,6 +347,19 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 15
+        # READINESS STAYS ON THE ENGINE'S OWN HEALTH, and that is a correction.
+        # It pointed at the reporter's /ready on :9109, on the argument that an
+        # engine which will not say what it holds should stop taking traffic —
+        # making under-reporting cost something. Deploying it showed the cost is
+        # paid by the wrong party: an image without the reporter has NO
+        # INFERENCE AT ALL. That is a total outage caused by licensing, the
+        # exact failure this design forbids everywhere else (it is why the
+        # reporter's own /ready refuses to consult the licence manager).
+        #
+        # The anti-tamper property does not need this. A silent reporter becomes
+        # an unreadable source, the licence manager counts it against coverage,
+        # and scanning stops — visible, attributable, and it does not take the
+        # engine down. Metering degrades; inference does not.
         readinessProbe:
           httpGet:
             path: /v2/health/ready
@@ -144,6 +368,10 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 15
+      {{- if $colocated }}
+      # policyGuard, on this pod's card (header; the container is _vllm.tpl's).
+      {{- include "fortiaigate.vllmContainer" (dict "root" . "colocated" true) | nindent 6 }}
+      {{- end }}
       volumes:
       - name: model-repository
         emptyDir: {}
@@ -154,24 +382,131 @@ spec:
         emptyDir:
           medium: Memory
           sizeLimit: 6Gi
+      {{- if $colocated }}
+      - name: gpu-probe
+        configMap:
+          name: {{ $name }}-gpu-probe
+          defaultMode: 0444
+      # The ServiceAccount token, by hand, for the gpu-probe initContainer only
+      # (automountServiceAccountToken above): the same three files the kubelet
+      # would have mounted into every container.
+      - name: kube-api-access
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3607
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - key: ca.crt
+                path: ca.crt
+          - downwardAPI:
+              items:
+              - path: namespace
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+      {{- include "fortiaigate.vllmVolumes" (dict "root" . "tp" $tritonGpuCount) | nindent 6 }}
+      {{- end }}
       {{- with .Values.fortiaigate.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- if $colocated }}
+---
+# The gpu-probe's identity (header). Rendered in shared mode only, and the
+# token reaches the probe initContainer alone.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    app: {{ $name }}
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+automountServiceAccountToken: false
+---
+# pods get+patch, namespace-wide: RBAC cannot name a pod the ReplicaSet has not
+# created yet, and the probe patches ITS OWN pod's one annotation. Narrower in
+# verbs than the retired shared-runtime grant (configmaps patch + pods delete)
+# and equal in scope. A ValidatingAdmissionPolicy can bind the patch to the
+# caller's own pod and that one key if a security review asks for it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    app: {{ $name }}
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    app: {{ $name }}
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+subjects:
+- kind: ServiceAccount
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+---
+# files/gpu-probe.py, as the gpu-probe initContainer runs it. Hashed into the
+# pod template above so a change here rolls the pod.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-gpu-probe
+  labels:
+    app: {{ $name }}
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+data:
+  gpu-probe.py: |
+{{ include "fortiaigate.gpuProbeScript" . | indent 4 }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: triton-server
   labels:
-    app: triton-server
+    app: {{ $name }}
     app.kubernetes.io/name: fortiaigate
     app.kubernetes.io/part-of: fortiaigate-platform
     app.kubernetes.io/managed-by: helm
 spec:
   clusterIP: None  # Headless service for gRPC client-side load balancing
+  # shared (co-located): the pod carries the vllm container too, and a pod is Ready
+  # only when EVERY container is — the kubelet holds a container not Ready
+  # while it is not running or its startupProbe has not passed, readiness
+  # probe or not. Filtering this Service on pod readiness would therefore
+  # pull Triton out of DLP for every vLLM model load (minutes, at every pod
+  # start), restart and crash loop: a policyGuard fault taking DLP down. So
+  # every pod is published, and Triton's availability is its own: the DLP
+  # scanner's gRPC client (round_robin, no wait-for-ready) marks a Triton
+  # that refuses connections — it opens no port until its models are loaded
+  # — TRANSIENT_FAILURE and uses the others, failing fast with one pod, the
+  # same outcome as the NXDOMAIN an endpoint-less headless Service gives
+  # today. Standalone Triton (dedicated, or no vLLM) keeps the filter.
+  publishNotReadyAddresses: {{ $colocated }}
   selector:
-    app: triton-server
+    app: {{ $name }}
   ports:
   - protocol: TCP
     port: 8001
@@ -182,362 +517,166 @@ spec:
     targetPort: 8002
     name: metrics
 ---
+# The metering endpoint gets its OWN service rather than riding the one above,
+# even though that one is already headless. The difference is
+# publishNotReadyAddresses: an engine whose cards are known but whose models are
+# still loading is NOT ready to serve, and its cards still count — excluding it
+# would make coverage improve every time an engine restarted. Setting that on
+# the gRPC service for a standalone Triton would send scanner traffic to an
+# engine that cannot answer, a different and worse trade; the co-located pod
+# is the exception (above), where pod readiness says nothing about Triton
+# alone and the gRPC client, not the Service, does the filtering.
+apiVersion: v1
+kind: Service
+metadata:
+  name: triton-server-metering
+  labels:
+    app: {{ $name }}
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: {{ $name }}
+  ports:
+  - protocol: TCP
+    port: 9109
+    targetPort: 9109
+    name: gpu-meter
+  # Triton's own Prometheus port, exposed HERE as well as on the gRPC service,
+  # so the metering fallback inherits publishNotReadyAddresses above. An engine
+  # still loading its models holds its cards either way; reading them off the
+  # gRPC service would drop it from the count until it was ready.
+  - protocol: TCP
+    port: 8002
+    targetPort: 8002
+    name: gpu-metrics
+---
 # ConfigMap for Triton model repository configuration
-# This contains the config.pbtxt files for all 5 models
+# One entry only, matching the one model faig-models carries for Triton. The
+# prompt_injection / toxicity / language configs were removed with the models;
+# restore them from git history together with a carrier image that has them.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: triton-model-repository
   labels:
-    app: triton-server
+    app: {{ $name }}
     app.kubernetes.io/name: fortiaigate
     app.kubernetes.io/part-of: fortiaigate-platform
     app.kubernetes.io/managed-by: helm
 data:
-  prompt_injection_model-config.pbtxt: |
-    name: "prompt_injection_model"
-    platform: "onnxruntime_onnx"
-    max_batch_size: 16
-
-    dynamic_batching {
-      preferred_batch_size: [ 8, 16 ]
-      max_queue_delay_microseconds: 2000
-    }
-
-    # Auto-detects hardware with fallback: TensorRT → CUDA → CPU
-    optimization {
-      execution_accelerators {
-        gpu_execution_accelerator : [
-          {
-            name : "tensorrt"
-            parameters { key: "precision_mode" value: "FP32" }
-            parameters { key: "trt_profile_min_shapes" value: "input_ids:1x512,attention_mask:1x512" }
-            parameters { key: "trt_profile_max_shapes" value: "input_ids:16x512,attention_mask:16x512" }
-            parameters { key: "trt_profile_opt_shapes" value: "input_ids:8x512,attention_mask:8x512" }
-            parameters { key: "trt_engine_cache_enable" value: "1" }
-            parameters { key: "trt_engine_cache_path" value: "/tmp/prompt_injection_trt_cache" }
-          },
-          {
-            name : "cuda"
-          }
-        ]
-      }
-    }
-
-    instance_group [
-      {
-        count: 1
-        kind: KIND_AUTO
-        rate_limiter {
-          resources [
-            {
-              name: "gpu_slots"
-              count: 50
-            }
-          ]
-        }
-      }
-    ]
-
-    input [
-      {
-        name: "input_ids"
-        data_type: TYPE_INT64
-        dims: [ -1 ]
-      },
-      {
-        name: "attention_mask"
-        data_type: TYPE_INT64
-        dims: [ -1 ]
-      }
-    ]
-
-    output [
-      {
-        name: "logits"
-        data_type: TYPE_FP32
-        dims: [ 2 ]
-      }
-    ]
-
-    # Repository agent configuration
-    model_repository_agents
-    {
-      agents [
-        {
-          name: "agent"
-          parameters [
-            {
-              key: "agent_key"
-              value: "DEFAULT_AGENT_KEY"
-            }
-          ]
-        }
-      ]
-    }
-
-  toxicity_model-config.pbtxt: |
-    name: "toxicity_model"
-    platform: "onnxruntime_onnx"
-    max_batch_size: 16
-
-    dynamic_batching {
-      preferred_batch_size: [ 8, 16 ]
-      max_queue_delay_microseconds: 2000
-    }
-
-    optimization {
-      execution_accelerators {
-        gpu_execution_accelerator : [
-          {
-            name : "tensorrt"
-            parameters { key: "precision_mode" value: "FP32" }
-            parameters { key: "trt_profile_min_shapes" value: "input_ids:1x512,attention_mask:1x512" }
-            parameters { key: "trt_profile_max_shapes" value: "input_ids:16x512,attention_mask:16x512" }
-            parameters { key: "trt_profile_opt_shapes" value: "input_ids:8x512,attention_mask:8x512" }
-            parameters { key: "trt_engine_cache_enable" value: "1" }
-            parameters { key: "trt_engine_cache_path" value: "/tmp/toxicity_trt_cache" }
-          },
-          {
-            name : "cuda"
-          }
-        ]
-      }
-    }
-
-    instance_group [
-      {
-        count: 1
-        kind: KIND_AUTO
-        rate_limiter {
-          resources [
-            {
-              name: "gpu_slots"
-              count: 50
-            }
-          ]
-        }
-      }
-    ]
-
-    input [
-      {
-        name: "input_ids"
-        data_type: TYPE_INT64
-        dims: [ -1 ]
-      },
-      {
-        name: "attention_mask"
-        data_type: TYPE_INT64
-        dims: [ -1 ]
-      }
-    ]
-
-    output [
-      {
-        name: "logits"
-        data_type: TYPE_FP32
-        dims: [ 16 ]
-      }
-    ]
-
-    # Repository agent configuration
-    model_repository_agents
-    {
-      agents [
-        {
-          name: "agent"
-          parameters [
-            {
-              key: "agent_key"
-              value: "DEFAULT_AGENT_KEY"
-            }
-          ]
-        }
-      ]
-    }
-
   sensitive_model-config.pbtxt: |
-    name: "sensitive_model"
-    platform: "onnxruntime_onnx"
-    max_batch_size: 16
+{{ include "fortiaigate.tritonDlpModelConfig" . | indent 4 }}
+{{- /*
+The DLP model's config.pbtxt. A named template so the Deployment can hash it:
+the pod restarts when it changes, which is the only way Triton re-reads it.
+*/ -}}
+{{- define "fortiaigate.tritonDlpModelConfig" -}}
+{{- $raw := .Values.triton.dlpInstancesPerGpu -}}
+{{- $instances := 1 -}}
+{{- if not (kindIs "invalid" $raw) -}}
+{{- $instances = int $raw -}}
+{{- end -}}
+{{- if lt $instances 1 -}}
+{{- fail (printf "triton.dlpInstancesPerGpu must be a whole number of 1 or more, got %v" $raw) -}}
+{{- end -}}
+name: "sensitive_model"
+platform: "onnxruntime_onnx"
+max_batch_size: 16
 
-    dynamic_batching {
-      preferred_batch_size: [ 8, 16 ]
-      max_queue_delay_microseconds: 2000
-    }
+dynamic_batching {
+  preferred_batch_size: [ 8, 16 ]
+  max_queue_delay_microseconds: 2000
+}
 
-    optimization {
-      execution_accelerators {
-        gpu_execution_accelerator : [
-          {
-            name : "tensorrt"
-            parameters { key: "precision_mode" value: "FP16" }
-            parameters { key: "max_workspace_size_bytes" value: "4294967296" }
-            parameters { key: "trt_engine_cache_enable" value: "1" }
-            parameters { key: "trt_engine_cache_path" value: "/tmp/sensitive_trt_cache" }
-            parameters { key: "trt_profile_min_shapes" value: "input_ids:1x512,attention_mask:1x512,words_mask:1x512,text_lengths:1x1,span_idx:1x4608x2,span_mask:1x4608" }
-            parameters { key: "trt_profile_max_shapes" value: "input_ids:16x512,attention_mask:16x512,words_mask:16x512,text_lengths:16x1,span_idx:16x4608x2,span_mask:16x4608" }
-            parameters { key: "trt_profile_opt_shapes" value: "input_ids:8x512,attention_mask:8x512,words_mask:8x512,text_lengths:8x1,span_idx:8x4608x2,span_mask:8x4608" }
-          },
-          {
-            name : "cuda"
-          }
-        ]
-      }
-    }
-
-    instance_group [
+optimization {
+  execution_accelerators {
+    gpu_execution_accelerator : [
       {
-        count: 1
-        kind: KIND_AUTO
-        rate_limiter {
-          resources [
-            {
-              name: "gpu_slots"
-              count: 50
-            }
-          ]
-        }
-      }
-    ]
-
-    input [
-      {
-        name: "input_ids"
-        data_type: TYPE_INT64
-        dims: [ 512 ]
+        name : "tensorrt"
+        parameters { key: "precision_mode" value: "FP16" }
+        parameters { key: "max_workspace_size_bytes" value: "4294967296" }
+        # Engine + timing cache. /tmp is inside the container, so every pod
+        # restart rebuilds the engine (~2 min on an L4, model not READY
+        # meanwhile). Mount a node-local volume here to make that a one-off.
+        parameters { key: "trt_engine_cache_enable" value: "1" }
+        parameters { key: "trt_engine_cache_path" value: "/tmp/sensitive_model_trt_cache" }
+        parameters { key: "trt_timing_cache_enable" value: "1" }
+        parameters { key: "trt_timing_cache_path" value: "/tmp/sensitive_model_trt_cache" }
+        # Graph-v2 contract (convert_triton_trt/convert_gliner_trt.py --graph v2):
+        # three [batch, sequence] inputs, NO span_idx. The sequence axis is
+        # dynamic [8..512]. OPT 1x512 because long text arrives as full
+        # 510-token windows, mostly one request at a time, and batching does
+        # not lower this model's per-request cost (L4: bs1 11.3 ms, bs8
+        # 12.5 ms/request). A graph-v1 export needs span_idx:Bx8192x2 in all
+        # three shape strings and the span_idx input below — take the whole
+        # block from the config.pbtxt the converter wrote for that export.
+        parameters { key: "trt_profile_min_shapes" value: "input_ids:1x8,attention_mask:1x8,words_mask:1x8" }
+        parameters { key: "trt_profile_max_shapes" value: "input_ids:16x512,attention_mask:16x512,words_mask:16x512" }
+        parameters { key: "trt_profile_opt_shapes" value: "input_ids:1x512,attention_mask:1x512,words_mask:1x512" }
       },
       {
-        name: "attention_mask"
-        data_type: TYPE_INT64
-        dims: [ 512 ]
-      },
-      {
-        name: "words_mask"
-        data_type: TYPE_INT64
-        dims: [ 512 ]
-      },
-      {
-        name: "text_lengths"
-        data_type: TYPE_INT64
-        dims: [ 1 ]
-      },
-      {
-        name: "span_idx"
-        data_type: TYPE_INT64
-        dims: [ 4608, 2 ]
-      },
-      {
-        name: "span_mask"
-        data_type: TYPE_BOOL
-        dims: [ 4608 ]
+        name : "cuda"
       }
     ]
+  }
+}
 
-    output [
-      {
-        name: "logits"
-        data_type: TYPE_FP32
-        dims: [ 384, 12, 60]
-      }
-    ]
+instance_group [
+  {
+    count: {{ $instances }}
+    kind: KIND_AUTO
+  }
+]
 
-    # Repository agent configuration
-    model_repository_agents
+input [
+  {
+    name: "input_ids"
+    data_type: TYPE_INT64
+    dims: [ -1 ]
+  },
+  {
+    name: "attention_mask"
+    data_type: TYPE_INT64
+    dims: [ -1 ]
+  },
+  {
+    name: "words_mask"
+    data_type: TYPE_INT64
+    dims: [ -1 ]
+  }
+]
+
+output [
+  {
+    name: "logits"
+    data_type: TYPE_FP32
+    # [words, width, classes]. The words axis MUST MIRROR the model's own
+    # shape declaration — Triton 25.11 (ORT backend) rejects any other
+    # spelling, in BOTH directions: a symbolic axis needs -1, a concrete
+    # one needs its number (the graph-v1 XLM-R export declared a concrete
+    # 512 and refused -1 with "model expects [-1,512,16,55] but config
+    # makes [-1,-1,16,55]"; the earlier DeBERTa export was symbolic and
+    # refused 384). The graph-v2 export declares it SYMBOLIC — the word
+    # grid is the request's sequence length — hence -1 here.
+    # convert_gliner_trt.py writes this value from the exported graph and
+    # preflight_triton.py checks it, so on a re-export paste that run's
+    # config.pbtxt rather than editing by hand. 16 = max span width,
+    # 55 = label classes (labels.json order), both baked in at export.
+    dims: [ -1, 16, 55 ]
+  }
+]
+
+# Repository agent configuration
+model_repository_agents
+{
+  agents [
     {
-      agents [
-        {
-          name: "agent"
-          parameters [
-            {
-              key: "agent_key"
-              value: "DEFAULT_AGENT_KEY"
-            }
-          ]
-        }
-      ]
+      name: "agent"
     }
-
-  language_model-config.pbtxt: |
-    name: "language_model"
-    platform: "onnxruntime_onnx"
-    max_batch_size: 16
-
-    dynamic_batching {
-      preferred_batch_size: [ 8, 16 ]
-      max_queue_delay_microseconds: 2000
-    }
-
-
-    optimization {
-      execution_accelerators {
-        gpu_execution_accelerator : [
-          {
-            name : "tensorrt"
-            parameters { key: "precision_mode" value: "FP32" }
-            parameters { key: "trt_profile_min_shapes" value: "input_ids:1x512,attention_mask:1x512" }
-            parameters { key: "trt_profile_max_shapes" value: "input_ids:16x512,attention_mask:16x512" }
-            parameters { key: "trt_profile_opt_shapes" value: "input_ids:8x512,attention_mask:8x512" }
-            parameters { key: "trt_engine_cache_enable" value: "1" }
-            parameters { key: "trt_engine_cache_path" value: "/tmp/language_trt_cache" }
-          },
-          {
-            name : "cuda"
-          }
-        ]
-      }
-    }
-    instance_group [
-      {
-        count: 1
-        kind: KIND_AUTO
-        rate_limiter {
-          resources [
-            {
-              name: "gpu_slots"
-              count: 50
-            }
-          ]
-        }
-      }
-    ]
-
-    input [
-      {
-        name: "input_ids"
-        data_type: TYPE_INT64
-        dims: [ -1 ]
-      },
-      {
-        name: "attention_mask"
-        data_type: TYPE_INT64
-        dims: [ -1 ]
-      }
-    ]
-
-    output [
-      {
-        name: "logits"
-        data_type: TYPE_FP32
-        dims: [ 20 ]
-      }
-    ]
-
-    # Repository agent configuration
-    model_repository_agents
-    {
-      agents [
-        {
-          name: "agent"
-          parameters [
-            {
-              key: "agent_key"
-              value: "DEFAULT_AGENT_KEY"
-            }
-          ]
-        }
-      ]
-    }
-
-{{- end }}
+  ]
+}
+{{- end -}}

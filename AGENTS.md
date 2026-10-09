@@ -7,7 +7,8 @@ This guidance applies to coding agents working in this repository.
 - This repository deploys FortiAIGate on Azure AKS using Terraform and local Helm charts. Application source and container images are maintained elsewhere.
 - Preserve the AKS chart's ingress, TLS, licensing, storage, and GPU placement patches when importing upstream builds. Do not replace `fortiaigate/` wholesale or assume it matches the EKS chart.
 - Keep generated Terraform resource addresses stable during upgrades. Terraform owns PostgreSQL credentials and internal TLS; web TLS uses generated material, supplied PEM files, or cert-manager.
-- Keep shared RWX storage on Azure Files and database storage on dedicated Azure Disks. Preserve licensed-hostname affinity and the GPU pool's explicit `gpu_driver = "Install"` setting.
+- Keep shared RWX storage on Azure Files and database storage on dedicated Azure Disks. Build0047 uses deployment licenses: preserve app/GPU pool placement without node-license affinity, and keep the GPU pool's explicit `gpu_driver = "Install"` setting.
+- Terraform owns the credential encryption key, CSRF key, and Redis password as well as PostgreSQL credentials. Preserve their resource addresses and never regenerate them against retained data.
 - Inspect value precedence in `helm.tf` before changing chart defaults or adding overrides. Later values win, and Terraform `set` blocks have final precedence.
 - Keep deployment procedures and troubleshooting in `docs/`; link to them here instead of duplicating them. Update the relevant docs and changelog when behavior changes.
 - Keep credentials, licenses, PEM keys, kubeconfigs, local tfvars, state, plans, and rendered manifests out of version control.

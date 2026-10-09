@@ -5,11 +5,12 @@
 //
 // The browser UI calls /api/* on its own origin, so forwarding only the webui
 // Service loads the login page but login fails. This script port-forwards
-// webui, api and core, and serves them on ONE https origin with the same path
+// webui, api and llm-gateway, and serves them on ONE https origin with the same path
 // routing as the chart's ingress:
 //   /ui    -> webui:3000
 //   /api/  -> api:8000
-//   /      -> core:8080
+//   /ai    -> llm-gateway:8080
+//   /      -> webui:3000
 //
 // Usage:  node scripts/ui-proxy.mjs [listenPort]   (default 8443)
 // Then open https://localhost:8443/ui and accept the self-signed cert warning.
@@ -28,7 +29,8 @@ const LISTEN_PORT = Number(process.argv[2] || 8443);
 const ROUTES = [
   ["/ui", "webui", 3000, 13000],
   ["/api/", "api", 8000, 18000],
-  ["/", "core", 8080, 18080],
+  ["/ai", "llm-gateway", 8080, 18080],
+  ["/", "webui", 3000, 13000],
 ];
 
 // Self-signed cert for the local listener, generated once and reused.
@@ -44,7 +46,8 @@ if (!existsSync(keyFile) || !existsSync(certFile)) {
   ], { stdio: "ignore" });
 }
 
-const forwards = ROUTES.map(([, svc, port, localPort]) => {
+const forwardRoutes = [...new Map(ROUTES.map((route) => [route[1], route])).values()];
+const forwards = forwardRoutes.map(([, svc, port, localPort]) => {
   const pf = spawn("kubectl", ["-n", NAMESPACE, "port-forward", `svc/${svc}`, `${localPort}:${port}`], {
     stdio: ["ignore", "ignore", "inherit"],
   });
@@ -72,7 +75,11 @@ const upstreamAgent = new https.Agent({ rejectUnauthorized: false, keepAlive: tr
 const server = https.createServer(
   { key: readFileSync(keyFile), cert: readFileSync(certFile) },
   (req, res) => {
-    const [, svc, , localPort] = ROUTES.find(([prefix]) => req.url.startsWith(prefix));
+    const pathname = req.url.split("?")[0];
+    const [, svc, , localPort] = ROUTES.find(([prefix]) =>
+      prefix === "/" || pathname === prefix.replace(/\/$/, "") ||
+      pathname.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`),
+    );
     const upstream = https.request(
       {
         host: "127.0.0.1",

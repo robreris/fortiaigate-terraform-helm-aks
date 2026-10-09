@@ -5,8 +5,6 @@ metadata:
   name: webui
   {{- if .Values.tls.reloaderEnabled }}
   annotations:
-    # Stakater Reloader: roll this Deployment when the TLS secret changes so it
-    # stops serving an old cert without a manual `kubectl rollout restart`.
     secret.reloader.stakater.com/reload: {{ include "fortiaigate.tlsSecretName" . | quote }}
   {{- end }}
   labels:
@@ -29,17 +27,7 @@ spec:
       labels:
         app: webui
     spec:
-      {{- if .Values.global.licenses }}
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      {{- keys .Values.global.licenses | toYaml | nindent 22 }}
-      {{- end }}
+      {{- include "fortiaigate.appPlacement" . | nindent 6 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -49,7 +37,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: webui
-        image: {{ .Values.fortiaigate.image.repository }}/webui:{{ .Values.fortiaigate.image.tag }}
+        image: {{ .Values.fortiaigate.image.repository }}/webui:{{ .Values.webui.image.tag | default .Values.fortiaigate.image.tag }}
         imagePullPolicy: {{ .Values.fortiaigate.image.pullPolicy }}
         securityContext:
           allowPrivilegeEscalation: false
@@ -59,16 +47,10 @@ spec:
         command: ["node", "https-server.js"]
         ports:
         - containerPort: 3000
-          name: http
-          protocol: TCP
-        # Readiness probe doubles as the source AGIC/ALB derive the per-backend
-        # health probe from (see api.yaml for why per-backend paths are needed).
-        # The Next.js UI is served under basePath /ui, so / 404s and only /ui
-        # returns 200 -- that's both the health path and the browser entry point.
         readinessProbe:
           httpGet:
             path: /ui
-            port: http
+            port: 3000
             {{- if .Values.tls.enabled }}
             scheme: HTTPS
             {{- end }}

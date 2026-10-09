@@ -6,20 +6,20 @@
 
 Terraform stack that deploys FortiAIGate on Azure AKS.
 
-The local Helm chart is based on the downloaded FortiAIGate 8.0.1/build0031
+The local Helm chart is based on the downloaded FortiAIGate 8.0.2/build0047
 chart, with AKS-specific ingress, storage, TLS, license, and GPU placement
-patches. The default application and Triton image tags match build0031.
+patches. The default application and Triton image tags match build0047.
 
 ## What you get
 
 - A resource group holding the VNet, AKS cluster, Azure Files storage account, and (optionally) the Application Gateway.
 - AKS cluster with:
-  - An `app` node pool (default 1x `Standard_D16s_v5`, `max_pods` raised to 110) for FortiAIGate core services and the Bitnami PostgreSQL/Redis subcharts. Sized to the number of app-node licenses — node-keyed licensing pins all pods to licensed nodes, so the full service set runs on the one licensed node.
-  - An optional `gpu` node pool (default 1x `Standard_NV36ads_A10_v5`, an A10) for Triton inference, tainted so only GPU workloads land there. The GPU must be a Fortinet-supported model with ≥24 GB VRAM and SM 75+ — see [docs/gpu-triton-compatibility.md](docs/gpu-triton-compatibility.md).
+  - An `app` node pool (default 1x `Standard_D16s_v5`, `max_pods` raised to 110) for FortiAIGate application services and the Bitnami PostgreSQL/Redis subcharts. Workloads select the app pool independently of deployment licensing.
+  - An optional `gpu` node pool (default 1x `Standard_NV36ads_A10_v5`, an A10) for Triton/vLLM, tainted so only GPU workloads land there. The combined build0047 workload still needs hardware/runtime qualification — see [docs/gpu-triton-compatibility.md](docs/gpu-triton-compatibility.md).
   - OIDC issuer and workload identity enabled (AKS analogue of EKS IRSA).
   - AGIC addon (optional) — AKS provisions and manages a public Application Gateway in a dedicated subnet, or, with `internal = true`, drives a Terraform-managed gateway whose listeners bind to a static private IP.
 - A Premium Azure Files storage account, the kubelet identity role assignments needed for dynamic file-share provisioning, and an `azurefile-fortiaigate` StorageClass.
-- The `fortiaigate` Helm release, with generated internal TLS, generated/supplied/Let's Encrypt web TLS, and (optionally) per-node licenses sourced from a ConfigMap. For public DNS and production TLS, see [docs/application-gateway-dns-tls.md](docs/application-gateway-dns-tls.md).
+- The `fortiaigate` Helm release, with generated internal TLS, generated/supplied/Let's Encrypt web TLS, and deployment licensing uploaded through the admin API. For public DNS and production TLS, see [docs/application-gateway-dns-tls.md](docs/application-gateway-dns-tls.md).
 
 ## Prerequisites
 
@@ -64,13 +64,7 @@ terraform apply \
 #  as the cluster exists. In internal mode the Terraform-managed gateway is
 #  pulled into step 1 automatically, since the cluster references it.)
 
-# Both node pools now exist. Discover node names and set var.licenses before
-# the full apply (see node-keyed licensing notes):
-#   $(terraform output -raw configure_kubectl)
-#   kubectl get nodes -o custom-columns=NAME:.metadata.name,ROLE:.metadata.labels.fortiaigate-role --no-headers
-#
-# If gpu_enabled = true, var.licenses must include the aks-gpu-* node too;
-# Triton is pinned to both the GPU node selector and licensed hostnames.
+# Infrastructure is ready for the full application apply.
 ```
 
 Before the full apply, make sure the AKS kubelet identity has `AcrPull`
@@ -87,6 +81,11 @@ kubectl get pods,pvc,ingress -n fortiaigate
 terraform output ingress_address
 ```
 
+After installation, upload your deployment license through the authenticated
+`POST /api/v1/admin/licenses` endpoint using the release's documented request
+format. License validity and GPU coverage require functional checks. See
+[operations](docs/operations.md#deployment-licensing).
+
 For the Azure equivalent of the AWS `ALB + Route 53 + ACM` flow, use
 Application Gateway + Azure DNS (or your DNS provider) + a trusted TLS
 certificate. See [Application Gateway, DNS, and TLS](docs/application-gateway-dns-tls.md).
@@ -96,7 +95,9 @@ To deploy with your own certificate and private key, see [Supplied TLS certifica
 
 The `helm` and `kubernetes` providers in `providers.tf` read connection details from `azurerm_kubernetes_cluster.this.kube_config`. On a clean apply the cluster doesn't exist yet, so any single-shot run fails when Terraform tries to plan the helm/kubernetes resources. Bootstrap the infra first, then apply the rest. Subsequent applies don't need targeting.
 
-Only the helm/kubernetes resources have to wait — every `azurerm` resource can go in step 1. The GPU node pool (`azurerm_kubernetes_cluster_node_pool.gpu`) is therefore included in the first apply so **both** node pools exist before the full apply. That's what lets you discover the real node names and populate `var.licenses` between the two steps (node-keyed licensing). If the GPU pool is left for the second apply, its node name isn't knowable until the same apply that also wires in the licenses, which makes the hostname-affinity licensing impossible to satisfy on first deploy.
+Bootstrap the GPU pool with the infrastructure when enabled so inference can
+schedule during the full apply. Build0047 does not require node-name discovery
+or per-node license files between these steps.
 
 ## Per-subscription layout
 
@@ -107,7 +108,7 @@ State, backend, and variables are partitioned by Azure subscription:
 | `backends/<name>.hcl.example` | Template for a backend config | Yes |
 | `backends/<name>.hcl` | Actual backend config (storage account, container, key) | No (gitignored) |
 | `tfvars/<name>.tfvars.example` | Template for a tfvars file | Yes |
-| `tfvars/<name>.tfvars` | Actual variable values (image repo, ingress host, licenses) | No (gitignored) |
+| `tfvars/<name>.tfvars` | Actual variable values (image repo, ingress host, GPU topology) | No (gitignored) |
 
 To switch subscriptions, set the AZ context (`az account set --subscription <id>`), then re-init with the new backend: `terraform init -backend-config=backends/<new>.hcl -reconfigure`.
 
@@ -117,14 +118,14 @@ To switch subscriptions, set the AZ context (`az account set --subscription <id>
 |----------|---------|-------|
 | `location` | `eastus` | Azure region. Must have quota for the chosen VM sizes — A10/A100 GPU families are request-only (default 0) in most regions. |
 | `cluster_name` | `fortiaigate` | Used as the AKS name, DNS prefix, and (after stripping) the storage account name prefix. |
-| `app_node_count` | `1` | Number of **licensed** app nodes; pool is pinned (min=max). Pods are pinned to licensed nodes, so set this to your app-node license count. |
-| `app_node_max_pods` | `110` | Per-node pod cap. Raised above the Azure CNI default of 30 so the whole service set fits on the one licensed app node. |
-| `gpu_enabled` | `false` | Set true to add the GPU node pool + nvidia-device-plugin Helm release + Triton workloads. Needs a supported GPU + quota (see prerequisites). |
+| `app_node_count` | `1` | Fixed application pool size, independent of deployment licenses. |
+| `app_node_max_pods` | `110` | Per-node pod cap. Account for service/system pods and Azure CNI subnet capacity. |
+| `gpu_enabled` | `false` | Adds the GPU pool and device plugin. Without it, vLLM is disabled and POLICY detectors fail closed; CPU-only capabilities are unqualified. |
 | `gpu_node_vm_size` | `Standard_NV36ads_A10_v5` | A10 (24 GB, SM 86). Must be a Fortinet-supported GPU with ≥24 GB VRAM and SM 75+; the V100 fails. |
 | `acr_id` | `""` | Set to the ACR resource ID to codify the kubelet `AcrPull` grant; leave empty if managed elsewhere. |
-| `image_tag` | `V8.0.1-build0031` | Application image tag; does not set Triton image tags. |
-| `triton_image_tag` | `25.11-onnx-trt-agt-s1` | `custom-triton` tag when GPU is enabled. |
-| `triton_models_image_tag` | `0.1.6-s1` | `triton-models` tag when GPU is enabled. |
+| `image_tag` | `V8.0.2-build0047` | Application image tag; does not set Triton image tags. |
+| `triton_image_tag` | `25.11-onnx-trt-agt-rpt-s1` | `custom-triton` tag when GPU is enabled. |
+| `triton_models_image_tag` | `0.0.4-s1` | `faig-models` tag shared by Triton and vLLM. |
 | `db_storage_class` | `managed-csi` | Block (RWO) StorageClass for PostgreSQL/Redis — they cannot run on the shared Azure Files (SMB) class. |
 | `agic_enabled` | `true` | Disable to use ingress-nginx or web_app_routing instead. |
 | `ingress_class` | `azure-application-gateway` | Must match the installed controller. |
@@ -132,27 +133,29 @@ To switch subscriptions, set the AZ context (`az account set --subscription <id>
 | `appgw_private_ip` | `""` | Private frontend IP when `internal = true`. Empty = second-to-last address of `appgw_subnet_cidr` (e.g. `10.0.64.254`). |
 | `ingress_host` | `""` | Hostname for the ingress rule, e.g. `fortiaigate.example.com`. Set this before creating DNS/TLS for a public UI. |
 | `image_repository` | *(required)* | e.g. `myregistry.azurecr.io/fortiaigate`. |
-| `licenses` | `{}` | `{ "aks-app-xxxxxxxx-vmss000000" = "licenses/APP.lic", "aks-gpu-xxxxxxxx-vmss000000" = "licenses/GPU.lic" }`. Populate after step 1 with the real node names; include the GPU node when `gpu_enabled = true`. |
+| `vllm_image_tag` | `0.28.0-rpt-s1` | vLLM serving and GPU-probe image. |
+| `vllm_gpu_attach` | `shared` | Explicit shared/dedicated GPU layout; shared runtime needs live AKS qualification. |
+| `gpu_node_count` | `1` | Fixed GPU pool size; dedicated mode normally needs at least two one-GPU nodes. |
 
 Full list in `variables.tf`.
 
-The Terraform defaults and tfvars examples select the build0031 image set.
-Set all three image tag variables explicitly when moving to a later build.
+The Terraform defaults and tfvars examples select the build0047 image set.
+Set all four image tag variables explicitly when moving to a later build.
 This repository does not bundle images; the
 [registry guide](docs/registry-and-images.md) records the names and tags
-verified from the supplied build0031 archives.
+verified from the supplied build0047 archives.
 
-Upgrading an existing release from the earlier chart changes the Ingress paths
-to build0031's `/ui` → webui, `/api/` → api, and `/` → core, and replaces the
-Triton model configuration with build0031's definitions. Review the Helm plan
-and follow the [live deployment checklist](docs/testing.md) before applying
-to a populated environment. This chart version has passed offline tests but
-has not yet completed a live AKS rollout.
+The build0047 port targets fresh installations. It replaces core/scanners with
+LLM gateway/guardrail services and routes `/ai` to the gateway, `/api/` to API,
+and `/ui` plus `/` to webui. It includes vLLM and deployment licensing.
+Existing deployment upgrades, database migration, and licensing conversion are
+not qualified; use [the compatibility audit](docs/build0047-compatibility.md).
+Offline tests do not establish live AKS or model compatibility.
 
 Terraform owns the local `fortiaigate` Helm release. `helm.tf` passes the
 variables above into chart values; its `set` blocks take precedence over
 `extra_values_files`. Terraform also overrides extra values for GPU placement,
-Azure Disk database storage, AGIC annotations, TLS, and licensed node affinity.
+Azure Disk database storage, AGIC annotations, TLS, stable application secrets, and app/GPU pool placement.
 Use `extra_values_files` for chart settings without a dedicated Terraform
 variable, such as per-service resource requests or replica counts. Changing the
 chart's defaults alone does not change values already supplied by Terraform.
@@ -166,6 +169,7 @@ tfvars example is a starting configuration, not a high-availability guarantee.
 
 ## Documentation
 
+- [8.0.2 build0047 compatibility audit](docs/build0047-compatibility.md) — planned AKS port, verified image tags, and validation gaps.
 - [Operations and upgrades](docs/operations.md) — credential adoption, licensing, storage constraints, and rollouts.
 - [Supplied TLS certificates](docs/tls-supplied.md) — use your own certificate while retaining internal database TLS.
 - [Application Gateway, DNS, and TLS](docs/application-gateway-dns-tls.md) — Azure equivalent of ALB + Route 53 + ACM.
@@ -250,14 +254,18 @@ No modules.
 | [helm_release.fortiaigate](https://registry.terraform.io/providers/hashicorp/helm/latest/docs/resources/release) | resource |
 | [helm_release.nvidia_device_plugin](https://registry.terraform.io/providers/hashicorp/helm/latest/docs/resources/release) | resource |
 | [helm_release.reloader](https://registry.terraform.io/providers/hashicorp/helm/latest/docs/resources/release) | resource |
-| [kubernetes_config_map.licenses](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/resources/config_map) | resource |
 | [kubernetes_namespace.fortiaigate](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/resources/namespace) | resource |
+| [kubernetes_secret.application](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/resources/secret) | resource |
 | [kubernetes_secret.internal_tls](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/resources/secret) | resource |
 | [kubernetes_secret.postgresql](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/resources/secret) | resource |
+| [kubernetes_secret.redis](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/resources/secret) | resource |
 | [kubernetes_secret.tls](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/resources/secret) | resource |
 | [kubernetes_storage_class.azurefile](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/resources/storage_class) | resource |
+| [random_password.application_master_key](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/password) | resource |
+| [random_password.csrf](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/password) | resource |
 | [random_password.postgresql_admin](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/password) | resource |
 | [random_password.postgresql_user](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/password) | resource |
+| [random_password.redis](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/password) | resource |
 | [random_string.storage_suffix](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/string) | resource |
 | [terraform_data.tls_configuration](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
 | [tls_cert_request.fortiaigate](https://registry.terraform.io/providers/hashicorp/tls/latest/docs/resources/cert_request) | resource |
@@ -278,10 +286,10 @@ No modules.
 | <a name="input_acr_id"></a> [acr\_id](#input\_acr\_id) | Resource ID of the Azure Container Registry holding the FortiAIGate images. When set, the AKS kubelet identity is granted AcrPull on it so nodes can pull images. Leave empty when the ACR is managed elsewhere (the grant must then exist outside this stack). Find it with: az acr show -n <name> --query id -o tsv | `string` | `""` | no |
 | <a name="input_agic_enabled"></a> [agic\_enabled](#input\_agic\_enabled) | Enable the AKS Application Gateway Ingress Controller addon. Creates an Application Gateway in the appgw subnet when enabled. | `bool` | `true` | no |
 | <a name="input_aks_subnet_cidr"></a> [aks\_subnet\_cidr](#input\_aks\_subnet\_cidr) | CIDR block for the AKS node subnet inside the VNet | `string` | `"10.0.0.0/20"` | no |
-| <a name="input_app_node_count"></a> [app\_node\_count](#input\_app\_node\_count) | Number of licensed application nodes (must match available app-node licenses) | `number` | `1` | no |
+| <a name="input_app_node_count"></a> [app\_node\_count](#input\_app\_node\_count) | Number of application nodes (independent of deployment licensing) | `number` | `1` | no |
 | <a name="input_app_node_disk_size_gb"></a> [app\_node\_disk\_size\_gb](#input\_app\_node\_disk\_size\_gb) | OS disk size (GB) for application nodes | `number` | `250` | no |
-| <a name="input_app_node_max_pods"></a> [app\_node\_max\_pods](#input\_app\_node\_max\_pods) | Max pods per application node (Azure CNI default 30 is too low for the full service set on one licensed node) | `number` | `110` | no |
-| <a name="input_app_node_vm_size"></a> [app\_node\_vm\_size](#input\_app\_node\_vm\_size) | Azure VM size for the application node pool. With one licensed app node all app pods run on it (~12 vCPU / ~24 GiB requested), so 16 vCPU (Standard\_D16s\_v5) is the practical minimum. | `string` | `"Standard_D16s_v5"` | no |
+| <a name="input_app_node_max_pods"></a> [app\_node\_max\_pods](#input\_app\_node\_max\_pods) | Max pods per application node; account for application/system pods and Azure CNI subnet capacity | `number` | `110` | no |
+| <a name="input_app_node_vm_size"></a> [app\_node\_vm\_size](#input\_app\_node\_vm\_size) | Azure VM size for the application pool. Size for application requests and database resources; deployment licenses no longer bind workloads to node names. | `string` | `"Standard_D16s_v5"` | no |
 | <a name="input_appgw_private_ip"></a> [appgw\_private\_ip](#input\_appgw\_private\_ip) | Static private frontend IP for the Application Gateway when internal = true. Must be an unused address inside appgw\_subnet\_cidr. Empty = second-to-last address of the subnet (e.g. 10.0.64.254 for 10.0.64.0/24), per Microsoft's guidance to allocate gateway frontends from the top of the subnet. | `string` | `""` | no |
 | <a name="input_appgw_subnet_cidr"></a> [appgw\_subnet\_cidr](#input\_appgw\_subnet\_cidr) | CIDR block for the Application Gateway subnet inside the VNet. Must not overlap with aks\_subnet\_cidr. | `string` | `"10.0.64.0/24"` | no |
 | <a name="input_cert_manager_version"></a> [cert\_manager\_version](#input\_cert\_manager\_version) | cert-manager Helm chart version to install (e.g. 'v1.16.2'). Use a release that supports Azure workload identity for the DNS-01 solver (v1.11+). | `string` | `"v1.16.2"` | no |
@@ -290,11 +298,12 @@ No modules.
 | <a name="input_dns_zone_name"></a> [dns\_zone\_name](#input\_dns\_zone\_name) | Name of the existing public Azure DNS zone cert-manager writes the \_acme-challenge TXT records into (e.g. 'example.com'). Required when letsencrypt\_enabled = true. | `string` | `""` | no |
 | <a name="input_dns_zone_resource_group"></a> [dns\_zone\_resource\_group](#input\_dns\_zone\_resource\_group) | Resource group containing the Azure DNS zone (var.dns\_zone\_name). May differ from the cluster RG (e.g. an App Service Domains zone). The Terraform principal needs role-assignment write on this scope to grant cert-manager DNS Zone Contributor. Required when letsencrypt\_enabled = true. | `string` | `""` | no |
 | <a name="input_extra_values_files"></a> [extra\_values\_files](#input\_extra\_values\_files) | Additional Helm values YAML files to merge (applied left-to-right, later files take precedence) | `list(string)` | `[]` | no |
-| <a name="input_gpu_enabled"></a> [gpu\_enabled](#input\_gpu\_enabled) | Add a GPU node pool for Triton inference. When false, triton is disabled and all workloads run CPU-only. | `bool` | `false` | no |
+| <a name="input_gpu_enabled"></a> [gpu\_enabled](#input\_gpu\_enabled) | Add a GPU pool for Triton and vLLM. When false, Triton still renders without GPU allocation and vLLM is disabled; POLICY detectors require vLLM and fail closed without it. CPU capabilities need live qualification. | `bool` | `false` | no |
+| <a name="input_gpu_node_count"></a> [gpu\_node\_count](#input\_gpu\_node\_count) | Fixed GPU pool size. Dedicated Triton/vLLM mode needs enough cards for both engines (normally at least two one-GPU nodes). | `number` | `1` | no |
 | <a name="input_gpu_node_disk_size_gb"></a> [gpu\_node\_disk\_size\_gb](#input\_gpu\_node\_disk\_size\_gb) | OS disk size (GB) for GPU nodes | `number` | `250` | no |
 | <a name="input_gpu_node_vm_size"></a> [gpu\_node\_vm\_size](#input\_gpu\_node\_vm\_size) | Azure VM size for the GPU node pool. Must be a Fortinet-supported GPU (A10/A100; L4 unavailable on Azure) with >=24 GB VRAM AND SM 75+. Default Standard\_NV36ads\_A10\_v5 (A10, 24 GB). NOTE: A10/A100 families default to 0 quota — request a quota increase first (see docs/gpu-triton-compatibility.md). | `string` | `"Standard_NV36ads_A10_v5"` | no |
 | <a name="input_helm_timeout"></a> [helm\_timeout](#input\_helm\_timeout) | Seconds the helm provider waits for the fortiaigate release to become ready before erroring with 'context deadline exceeded' | `number` | `2400` | no |
-| <a name="input_image_tag"></a> [image\_tag](#input\_image\_tag) | Image tag for FortiAIGate application services (api, core, webui, logd, license\_manager, scanner); Triton and its model image use separate tags. | `string` | `"V8.0.1-build0031"` | no |
+| <a name="input_image_tag"></a> [image\_tag](#input\_image\_tag) | Image tag for FortiAIGate application services (api, llm-gateway, webui, logd, license\_manager, guardrail, guardrail-scanner); Triton and its model image use separate tags. | `string` | `"V8.0.2-build0047"` | no |
 | <a name="input_ingress_annotations"></a> [ingress\_annotations](#input\_ingress\_annotations) | Additional ingress annotations. Keys with dots/slashes are handled correctly via values YAML merge. | `map(string)` | `{}` | no |
 | <a name="input_ingress_class"></a> [ingress\_class](#input\_ingress\_class) | Ingress class name. 'azure-application-gateway' uses AGIC; 'nginx' uses ingress-nginx (which must be installed separately or via web\_app\_routing). | `string` | `"azure-application-gateway"` | no |
 | <a name="input_ingress_host"></a> [ingress\_host](#input\_ingress\_host) | Hostname for the ingress rule. Leave empty to match all hosts. | `string` | `""` | no |
@@ -302,7 +311,7 @@ No modules.
 | <a name="input_kubernetes_version"></a> [kubernetes\_version](#input\_kubernetes\_version) | Kubernetes version for the AKS cluster. Azure aggressively deprecates older minors per region — verify with `az aks get-versions --location <region> -o table` before pinning. | `string` | `"1.35"` | no |
 | <a name="input_letsencrypt_enabled"></a> [letsencrypt\_enabled](#input\_letsencrypt\_enabled) | Install cert-manager and issue a Let's Encrypt web/API certificate via Azure DNS-01. Requires an existing public Azure DNS zone and ingress\_host, and is mutually exclusive with tls\_certificate\_path. Internal services and databases retain generated TLS certificates. | `bool` | `false` | no |
 | <a name="input_letsencrypt_environment"></a> [letsencrypt\_environment](#input\_letsencrypt\_environment) | Which ACME endpoint to use. 'staging' (default) has generous rate limits for validating the pipeline but its root is untrusted (browser still warns); flip to 'production' for a trusted cert. Changing this rolls the app pods to pick up the re-issued cert. | `string` | `"staging"` | no |
-| <a name="input_licenses"></a> [licenses](#input\_licenses) | Map of AKS node name to local license file path. Node names are available after cluster creation via 'kubectl get nodes'. Example: { "aks-app-12345678-vmss000000" = "/path/to/license.lic" } | `map(string)` | `{}` | no |
+| <a name="input_licenses"></a> [licenses](#input\_licenses) | Deprecated node-keyed license map. Must be empty for build0047; upload a deployment license through the admin API after installation. | `map(string)` | `{}` | no |
 | <a name="input_location"></a> [location](#input\_location) | Azure region to deploy into | `string` | `"eastus"` | no |
 | <a name="input_namespace"></a> [namespace](#input\_namespace) | Kubernetes namespace for the FortiAIGate deployment | `string` | `"fortiaigate"` | no |
 | <a name="input_resource_group_name"></a> [resource\_group\_name](#input\_resource\_group\_name) | Resource group that will contain the AKS cluster and all dependent resources | `string` | `"fortiaigate"` | no |
@@ -312,9 +321,11 @@ No modules.
 | <a name="input_tls_ca_certificate_path"></a> [tls\_ca\_certificate\_path](#input\_tls\_ca\_certificate\_path) | Optional PEM root CA certificate for supplied web/API certificates signed by a private CA. Uploaded automatically only to the Terraform-managed private Application Gateway; configure public add-on gateways manually. Omit for a publicly trusted certificate. This is a public certificate, never a CA private key. | `string` | `""` | no |
 | <a name="input_tls_certificate_path"></a> [tls\_certificate\_path](#input\_tls\_certificate\_path) | Optional PEM serving certificate chain (leaf first, then intermediates) for web/API HTTPS. Requires tls\_private\_key\_path and ingress\_host; mutually exclusive with letsencrypt\_enabled. Internal services and databases retain generated TLS certificates. | `string` | `""` | no |
 | <a name="input_tls_private_key_path"></a> [tls\_private\_key\_path](#input\_tls\_private\_key\_path) | Path to the unencrypted PEM private key matching tls\_certificate\_path. Its contents are stored in Terraform state; protect the state and keep the file outside version control. | `string` | `""` | no |
-| <a name="input_triton_image_tag"></a> [triton\_image\_tag](#input\_triton\_image\_tag) | Tag for the custom-triton inference server image when GPU is enabled. Must match the image pushed to the registry. | `string` | `"25.11-onnx-trt-agt-s1"` | no |
-| <a name="input_triton_models_image_tag"></a> [triton\_models\_image\_tag](#input\_triton\_models\_image\_tag) | Tag for the triton-models image when GPU is enabled. Must match the image pushed to the registry. | `string` | `"0.1.6-s1"` | no |
+| <a name="input_triton_image_tag"></a> [triton\_image\_tag](#input\_triton\_image\_tag) | Tag for the custom-triton inference server image in CPU/GPU profiles. Must match the image pushed to the registry. | `string` | `"25.11-onnx-trt-agt-rpt-s1"` | no |
+| <a name="input_triton_models_image_tag"></a> [triton\_models\_image\_tag](#input\_triton\_models\_image\_tag) | Tag for the combined faig-models carrier used by Triton and vLLM. Must match the image pushed to the registry. | `string` | `"0.0.4-s1"` | no |
 | <a name="input_update_strategy"></a> [update\_strategy](#input\_update\_strategy) | Deployment update strategy. 'Recreate' avoids GPU deadlock on single-GPU nodes; 'RollingUpdate' for zero-downtime when spare capacity exists. | `string` | `"Recreate"` | no |
+| <a name="input_vllm_gpu_attach"></a> [vllm\_gpu\_attach](#input\_vllm\_gpu\_attach) | Explicit GPU topology: shared runs Triton/vLLM in one pod; dedicated gives each engine its own GPU allocation. Shared mode requires live AKS NVIDIA runtime qualification. | `string` | `"shared"` | no |
+| <a name="input_vllm_image_tag"></a> [vllm\_image\_tag](#input\_vllm\_image\_tag) | Tag for the vLLM server and GPU-probe image. Qualify changes together with Triton and faig-models. | `string` | `"0.28.0-rpt-s1"` | no |
 | <a name="input_vnet_cidr"></a> [vnet\_cidr](#input\_vnet\_cidr) | CIDR block for the VNet that hosts AKS and the Application Gateway | `string` | `"10.0.0.0/16"` | no |
 
 ## Outputs

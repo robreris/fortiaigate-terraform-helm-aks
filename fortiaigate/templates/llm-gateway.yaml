@@ -2,25 +2,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: core
+  name: llm-gateway
   {{- if .Values.tls.reloaderEnabled }}
   annotations:
-    # Stakater Reloader: roll this Deployment when the TLS secret changes so it
-    # stops serving an old cert without a manual `kubectl rollout restart`.
     secret.reloader.stakater.com/reload: {{ include "fortiaigate.tlsSecretName" . | quote }}
   {{- end }}
   labels:
-    app: core
+    app: llm-gateway
     app.kubernetes.io/name: fortiaigate
     app.kubernetes.io/part-of: fortiaigate-platform
     app.kubernetes.io/managed-by: helm
 spec:
-  replicas: {{ .Values.core.replicas }}
+  replicas: {{ .Values.llmGateway.replicas }}
   strategy:
     type: {{ .Values.fortiaigate.updateStrategy }}
   selector:
     matchLabels:
-      app: core
+      app: llm-gateway
   template:
     metadata:
       annotations:
@@ -28,19 +26,9 @@ spec:
         checksum/internal-tls: {{ include "fortiaigate.internalTlsChecksum" . | quote }}
         checksum/tls: {{ include "fortiaigate.tlsChecksum" . | quote }}
       labels:
-        app: core
+        app: llm-gateway
     spec:
-      {{- if .Values.global.licenses }}
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      {{- keys .Values.global.licenses | toYaml | nindent 22 }}
-      {{- end }}
+      {{- include "fortiaigate.appPlacement" . | nindent 6 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -49,8 +37,8 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-      - name: core
-        image: {{ .Values.fortiaigate.image.repository }}/core:{{ .Values.fortiaigate.image.tag }}
+      - name: llm-gateway
+        image: {{ .Values.fortiaigate.image.repository }}/llm-gateway:{{ .Values.fortiaigate.image.tag }}
         imagePullPolicy: {{ .Values.fortiaigate.image.pullPolicy }}
         securityContext:
           allowPrivilegeEscalation: false
@@ -68,26 +56,102 @@ spec:
             {{- if .Values.tls.enabled }}
             scheme: HTTPS
             {{- end }}
-          initialDelaySeconds: 10
-          periodSeconds: 10
+          # The probe now waits for the config SNAPSHOT to load (and pings the
+          # DB), not just the license — so a cold pod legitimately reports
+          # not-ready for a moment. failureThreshold is generous because
+          # flapping out of rotation is worse than a slightly slow rollout:
+          # the gateway degrades around Redis and the scanner, so a 503 here
+          # means something that genuinely fails every request.
+          initialDelaySeconds: 5
+          periodSeconds: 5
           timeoutSeconds: 3
-          failureThreshold: 3
+          failureThreshold: 6
         resources:
-          {{- toYaml .Values.core.resources | nindent 10 }}
+          {{- toYaml .Values.llmGateway.resources | nindent 10 }}
         env:
-        - name: AIFLOW_MAX_PARALLEL_REQUESTS
-          value: {{ .Values.core.env.maxParallelRequests | quote }}
+        {{- if and .Values.tls.internalExistingSecret (or .Values.tls.enabled .Values.redis.tls.enabled .Values.postgresql.tls.enabled) }}
+        - name: SSL_CERT_FILE
+          value: {{ printf "%s/%s" (include "fortiaigate.dbTlsMountPath" .) (include "fortiaigate.dbTlsCAFile" .) | quote }}
+        {{- end }}
+        {{- if .Values.llmGateway.resources.limits.memory }}
+        # The gateway derives its admission budget AND GOMEMLIMIT from this, so
+        # changing resources.limits.memory below moves both without a second
+        # edit. Guarded on the limit existing on purpose: with no limit,
+        # resourceFieldRef falls back to the NODE's allocatable memory, and a
+        # budget sized against a 256 GiB node would be worse than not knowing.
+        - name: FAIG_MEMORY_LIMIT_BYTES
+          valueFrom:
+            resourceFieldRef:
+              containerName: llm-gateway
+              resource: limits.memory
+              divisor: "1"
+        {{- end }}
+        {{- with .Values.llmGateway.env.maxInflightBytes }}
+        # Absolute override; normally UNSET so the value above governs.
+        - name: FAIG_MAX_INFLIGHT_BYTES
+          value: {{ . | quote }}
+        {{- end }}
+        - name: AIFLOW_POOL_SIZE
+          value: {{ .Values.llmGateway.env.poolSize | quote }}
+        - name: AIFLOW_LOG_REDIS_POOL_SIZE
+          value: {{ .Values.llmGateway.env.logRedisPoolSize | quote }}
         - name: UPSTREAM_LLM_REQUEST_TIMEOUT
-          value: {{ .Values.core.env.upstreamLlmRequestTimeout | quote }}
-        # Core includes effective scanner limits in its cache keys.
+          value: {{ .Values.llmGateway.env.upstreamLlmRequestTimeout | quote }}
+        # Mirrors the scanner-side truncation limit. Core does not truncate; this value is
+        # mixed into the scanner-cache key so changes to maxScanChars invalidate stale entries.
+        # SCANNER_MAX_SCAN_CHARS is the global fallback used when a scanner name is not in
+        # the per-scanner JSON map below.
         - name: SCANNER_MAX_SCAN_CHARS
-          value: {{ .Values.scanners.env.maxScanChars | quote }}
+          value: {{ .Values.guardrail.env.maxScanChars | quote }}
         - name: SCANNER_MAX_SCAN_CHARS_BY_NAME
           value: {{ include "fortiaigate.scannerMaxCharsByName" . | quote }}
+        # The guardrail dispatcher pool (faig.guardrail.v1/Scan) the guard
+        # stages call. TLS posture is inferred in-process from
+        # FORTIAIGATE_SSL_CERT_FILE — the pool serves TLS exactly when the
+        # platform cert is mounted, and this pod carries the same mount.
+        # "off" disables scanning (dev only: content is then NOT inspected).
+        - name: FAIG_GUARDRAIL_ADDR
+          value: {{ (.Values.llmGateway.env).guardrailAddr | default "guardrail:50051" | quote }}
+        {{- with ((.Values.llmGateway.env).inStream).chunkBytes }}
+        # The in_stream sliding window (docs/workflows/in-stream-scan.md).
+        # Rendered only when set, so the binary's defaults (4096 / 1024)
+        # stay the single source of truth.
+        - name: FAIG_INSTREAM_CHUNK_BYTES
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with ((.Values.llmGateway.env).inStream).overlapBytes }}
+        - name: FAIG_INSTREAM_OVERLAP_BYTES
+          value: {{ . | quote }}
+        {{- end }}
         - name: UPSTREAM_TLS_VERIFY
-          value: {{ .Values.core.env.upstreamTls.verify | quote }}
+          value: {{ .Values.llmGateway.env.upstreamTls.verify | quote }}
+        # Bifrost core >= v1.10 refuses to dial RFC 1918 hosts unless told
+        # otherwise. A per-org endpoint override onto the cluster network (a
+        # self-hosted vLLM, an on-prem proxy) is exactly that case, so the
+        # default is true = dial what the operator typed, as 8.0.1 did.
+        - name: UPSTREAM_ALLOW_PRIVATE_NETWORK
+          value: {{ .Values.llmGateway.env.upstreamAllowPrivateNetwork | quote }}
+        # Master key decrypting provider credentials at the egress point
+        # (go-common/secret). Same resolution as api/dpAgent — see
+        # fortiaigate.masterKeySecretName in _helpers.tpl. Without this, any
+        # credential api-go encrypts is unreadable here: main.go degrades to
+        # plaintext-only-with-a-warning rather than failing calls outright,
+        # but that silently breaks every provider whose key was actually
+        # written encrypted.
+        - name: FAIG_MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fortiaigate.masterKeySecretName" . }}
+              key: master-key
         - name: FORTIAIGATE_LOG_LEVEL
           value: {{ .Values.fortiaigate.env.logLevel | quote }}
+        # Failure-policy pins (fortiaigate.failurePolicy.*, #91): rendered only
+        # for a knob that is set, so any knob left empty stays with the org's
+        # Runtime Defaults document. One helper feeds this pod and api, so
+        # the two cannot disagree on the policy.
+        {{- with (include "fortiaigate.failurePolicyEnv" . | trim) }}
+        {{- . | nindent 8 }}
+        {{- end }}
         {{- if .Values.tls.enabled }}
         - name: FORTIAIGATE_SSL_CERT_FILE
           value: {{ printf "%s/tls.crt" .Values.tls.mountPath | quote }}
@@ -176,18 +240,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: core
-  {{ if eq .Values.ingress.className "alb" }}
-  annotations:
-    alb.ingress.kubernetes.io/healthcheck-path: /fortiaigate/health/readiness
-  {{- end }}
+  name: llm-gateway
   labels:
     app.kubernetes.io/name: fortiaigate
     app.kubernetes.io/part-of: fortiaigate-platform
     app.kubernetes.io/managed-by: helm
 spec:
   selector:
-    app: core
+    app: llm-gateway
   ports:
   - protocol: TCP
     port: 8080

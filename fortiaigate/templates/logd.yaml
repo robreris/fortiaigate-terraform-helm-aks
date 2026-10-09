@@ -30,17 +30,7 @@ spec:
         component: logd
         version: v1
     spec:
-      {{- if .Values.global.licenses }}
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      {{- keys .Values.global.licenses | toYaml | nindent 22 }}
-      {{- end }}
+      {{- include "fortiaigate.appPlacement" . | nindent 6 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -61,6 +51,10 @@ spec:
           {{- toYaml .Values.logd.resources | nindent 10 }}
         # Environment variables
         env:
+        {{- if and .Values.tls.internalExistingSecret (or .Values.tls.enabled .Values.redis.tls.enabled .Values.postgresql.tls.enabled) }}
+        - name: SSL_CERT_FILE
+          value: {{ printf "%s/%s" (include "fortiaigate.dbTlsMountPath" .) (include "fortiaigate.dbTlsCAFile" .) | quote }}
+        {{- end }}
         - name: FORTIAIGATE_LOG_LEVEL
           value: {{ .Values.fortiaigate.env.logLevel | quote }}
         {{- if .Values.tls.enabled }}

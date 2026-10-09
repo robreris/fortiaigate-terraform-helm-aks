@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Port FortiAIGate 8.0.2/build0047 for fresh AKS installations: LLM gateway/guardrail services, explicit shared/dedicated Triton/vLLM layouts, and deployment licensing.
+- Preserve AKS ingress/probes, app/GPU placement, Azure Disk databases, and separate internal TLS; manage encryption, CSRF, and Redis credentials in Terraform.
+- Add build0047 Helm/Terraform contracts and document live qualification and upgrade gaps.
 - Replace duplicated Claude-specific guidance with shared `AGENTS.md` instructions and an operations/upgrade guide.
 - Support supplied PEM web/API certificates and optional private root CA trust for Application Gateway.
 - Separate internal service/database TLS from web certificates and retain database TLS in Let's Encrypt mode.

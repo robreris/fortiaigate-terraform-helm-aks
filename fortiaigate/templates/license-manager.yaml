@@ -1,6 +1,13 @@
-# License Manager Deployment
+# License Manager — a leader-elected pair, no longer a per-node DaemonSet.
+#
+# It was a DaemonSet because a licence belonged to a NODE and each pod validated
+# its own node's file. A licence now covers the deployment, lives in the
+# database, and is uploaded through the admin API — so there is nothing per-node
+# left to do. Two replicas elect a leader through a lease row (metering design
+# §6.3); the leader polls FortiGuard, scrapes the guardrail pool and publishes
+# encrypted state; BOTH serve the read API from validated memory snapshots.
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
   name: license-manager
   labels:
@@ -13,6 +20,7 @@ metadata:
   annotations:
     deployment.kubernetes.io/revision: "1"
 spec:
+  replicas: {{ .Values.license_manager.replicas }}
   selector:
     matchLabels:
       app: license-manager
@@ -21,33 +29,26 @@ spec:
     metadata:
       annotations:
         checksum/tls: {{ include "fortiaigate.internalTlsChecksum" . | quote }}
-        {{- with .Values.license.checksum }}
-        checksum/license: {{ . | quote }}
-        {{- end }}
       labels:
         app: license-manager
         component: license-manager
         version: v1
     spec:
-      {{- if .Values.global.licenses }}
+      {{- include "fortiaigate.appPlacement" . | nindent 6 }}
       affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      {{- keys .Values.global.licenses | toYaml | nindent 22 }}
-      {{- end }}
-      {{- with .Values.license_manager.placement.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.license_manager.placement.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        podAntiAffinity:
+          # PREFERRED, not required: a single-node cluster must still schedule
+          # both replicas. The failures this covers are rolling updates and OOM
+          # kills, which are per-pod, so two pods on one node still cover each
+          # other; spreading them is a bonus, not the point.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: license-manager
+                    component: license-manager
+                topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -57,13 +58,50 @@ spec:
         image: {{ .Values.fortiaigate.image.repository }}/license_manager:{{ .Values.fortiaigate.image.tag }}
         imagePullPolicy: {{ .Values.fortiaigate.image.pullPolicy }}
         ports:
-        - containerPort: 443
+        # 9443, not 443: the server listens on :9443 (internal/server). The
+        # Service already targets 9443 by number so traffic always worked, but
+        # the declared port was wrong — and a probe naming it would have gone to
+        # a port nothing listens on.
+        - containerPort: 9443
           name: https
           protocol: TCP
+        # PROBES. TLS is always on (the server self-signs when no cert is
+        # mounted), so both are HTTPS; kubelet does not verify the certificate.
+        #
+        # LIVENESS TOUCHES NOTHING BUT THE PROCESS. /healthz is a constant, so
+        # it fires only for a genuinely wedged server. Pointing it at anything
+        # external — the database above all — would turn an outage over there
+        # into a restart loop over here, and a restart fixes nothing.
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9443
+            scheme: HTTPS
+          initialDelaySeconds: 10
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
+        # Both replicas serve their validated in-memory snapshot, so readiness
+        # does not follow the database, leadership or licence validity: the pod
+        # is ready once it serves. A missing/expired snapshot is an explicit 503
+        # from the business API.
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9443
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
         resources:
           {{- toYaml .Values.license_manager.resources | nindent 10 }}
         # Environment variables
         env:
+        {{- if and .Values.tls.internalExistingSecret (or .Values.tls.enabled .Values.redis.tls.enabled .Values.postgresql.tls.enabled) }}
+        - name: SSL_CERT_FILE
+          value: {{ printf "%s/%s" (include "fortiaigate.dbTlsMountPath" .) (include "fortiaigate.dbTlsCAFile" .) | quote }}
+        {{- end }}
         - name: FORTIAIGATE_LOG_LEVEL
           value: {{ .Values.fortiaigate.env.logLevel | quote }}
         {{- if .Values.tls.enabled }}
@@ -72,42 +110,58 @@ spec:
         - name: FORTIAIGATE_SSL_KEY_FILE
           value: {{ printf "%s/tls.key" .Values.tls.mountPath | quote }}
         {{- end }}
-        - name: REDIS_SSL_ENABLED
-          value: {{ .Values.redis.tls.enabled | quote }}
-        {{- if .Values.redis.tls.enabled }}
-        - name: REDIS_SSL_CERTFILE
-          value: {{ printf "%s/tls.crt" (include "fortiaigate.dbTlsMountPath" .) | quote }}
-        - name: REDIS_SSL_KEYFILE
-          value: {{ printf "%s/tls.key" (include "fortiaigate.dbTlsMountPath" .) | quote }}
-        - name: REDIS_SSL_CA_CERTS
-          value: {{ printf "%s/%s" (include "fortiaigate.dbTlsMountPath" .) (include "fortiaigate.dbTlsCAFile" .) | quote }}
-        {{- end }}
-        # Database configuration (only what's actually used by the application)
-        - name: REDIS_HOST
-          valueFrom:
-            configMapKeyRef:
-              name: {{ include "fortiaigate.fullname" . }}-db-config
-              key: REDIS_HOST
-        - name: REDIS_PORT
-          valueFrom:
-            configMapKeyRef:
-              name: {{ include "fortiaigate.fullname" . }}-db-config
-              key: REDIS_PORT
-        - name: REDIS_PASSWORD
+        # PostgreSQL: the licences, the coverage snapshot, the leader lease and
+        # the FortiGuard client id all live here. Redis is GONE from the licence
+        # path entirely — which also means wiping Redis can no longer invalidate
+        # a licence.
+        - name: POSTGRES_USER
+          value: "{{ .Values.postgresql.auth.username }}"
+        - name: POSTGRES_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ .Release.Name }}-redis
-              key: redis-password
-        - name: NODE_NAME
+              name: {{ .Release.Name }}-postgresql
+              key: password
+        - name: POSTGRES_DB
+          value: "{{ .Values.postgresql.auth.database }}"
+        - name: POSTGRES_HOST
+          value: "{{ .Release.Name }}-postgresql"
+        - name: POSTGRES_PORT
+          value: "{{ .Values.postgresql.primary.service.port }}"
+        {{- if .Values.postgresql.tls.enabled }}
+        - name: POSTGRES_SSL_ENABLED
+          value: "true"
+        - name: POSTGRES_SSL_CERTFILE
+          value: {{ printf "%s/tls.crt" (include "fortiaigate.dbTlsMountPath" .) | quote }}
+        - name: POSTGRES_SSL_KEYFILE
+          value: {{ printf "%s/tls.key" (include "fortiaigate.dbTlsMountPath" .) | quote }}
+        - name: POSTGRES_SSL_CA_CERTS
+          value: {{ printf "%s/%s" (include "fortiaigate.dbTlsMountPath" .) (include "fortiaigate.dbTlsCAFile" .) | quote }}
+        {{- end }}
+        # The guardrail dispatcher answers the accelerator inventory the
+        # coverage verdict is computed from. Unset would mean the fleet cannot
+        # be measured, which the snapshot records as an unreadable source rather
+        # than as zero cards.
+        - name: GUARDRAIL_ADDR
+          value: "guardrail:50051"
+        # This replica's identity in the leader lease.
+        - name: POD_NAME
           valueFrom:
             fieldRef:
               apiVersion: v1
-              fieldPath: spec.nodeName
-        - name: LICENSE_KEY
+              fieldPath: metadata.name
+        - name: PROXY_ENABLED
+          value: {{ .Values.license_manager.proxy.enabled | quote }}
+        - name: PROXY_IP_ADDRESS
+          value: {{ .Values.license_manager.proxy.ipAddress | quote }}
+        - name: PROXY_PORT
+          value: {{ .Values.license_manager.proxy.port | quote }}
+        - name: PROXY_USERNAME
+          value: {{ .Values.license_manager.proxy.username | quote }}
+        - name: PROXY_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ .Release.Name }}-license-manager
-              key: license-key
+              key: proxy-password
+              name: fortiaigate-license-manager
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -116,40 +170,25 @@ spec:
               - ALL
         volumeMounts:
         {{- include "fortiaigate.dbTlsVolumeMount" . | nindent 8 }}
-        - name: shared-data
-          mountPath: /etc/fortiaigate/
-          readOnly: false
+        # /etc/fortiaigate (the shared PVC) and /data are GONE with the Redis
+        # store that used them. /tmp stays because the root filesystem is
+        # read-only.
         - name: tmp
           mountPath: /tmp
-        {{- if or .Values.tls.enabled .Values.redis.tls.enabled }}
+        {{- if or .Values.tls.enabled .Values.postgresql.tls.enabled }}
         - name: tls-certs
           mountPath: {{ .Values.tls.mountPath | quote }}
           readOnly: true
         {{- end }}
-        - name: license
-          mountPath: /etc/licenses/
-          readOnly: true
-        - name: data
-          mountPath: /data
       volumes:
       {{- include "fortiaigate.dbTlsVolume" . | nindent 6 }}
-      - name: shared-data
-        persistentVolumeClaim:
-          claimName: {{ include "fortiaigate.fullname" . }}-storage
       - name: tmp
         emptyDir: {}
-      - name: data
-        emptyDir:
-          medium: Memory
-          sizeLimit: 128Mi
-      {{- if or .Values.tls.enabled .Values.redis.tls.enabled }}
+      {{- if or .Values.tls.enabled .Values.postgresql.tls.enabled }}
       - name: tls-certs
         secret:
           secretName: {{ include "fortiaigate.internalTlsSecretName" . }}
       {{- end }}
-      - name: license
-        configMap:
-          name: {{ .Values.license.existingConfigMap | default (printf "%s-license-config" (include "fortiaigate.fullname" .)) }}
       {{- with .Values.fortiaigate.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -169,12 +208,12 @@ metadata:
   annotations:
     "helm.sh/resource-policy": "keep"
 type: Opaque
-data:
-  {{- $secretObj := (lookup "v1" "Secret" .Release.Namespace "fortiaigate-license-manager") | default dict }}
-  {{- $secretData := (get $secretObj "data") | default dict }}
-  # generate a license key if not exist
-  {{- $licenseKey := (get $secretData "license-key") | default (randAlphaNum 32 | b64enc) }}
-  license-key: {{ $licenseKey | quote }}
+# The generated `license-key` is GONE. It derived a Fernet key for the Redis
+# record, and there is no Redis record: the licence blob lives in PostgreSQL
+# unencrypted, because the payload protects itself — a Fortinet signature every
+# reader re-verifies, which an edited row fails.
+stringData:
+  proxy-password: {{ .Values.license_manager.proxy.password | quote }}
 ---
 apiVersion: v1
 kind: Service
@@ -193,11 +232,11 @@ spec:
     component: license-manager
   ports:
   - protocol: TCP
-    port: 9000
-    targetPort: 9000
-    name: http
-  - protocol: TCP
     port: 9443
     targetPort: 9443
     name: https
-  internalTrafficPolicy: Local
+  # internalTrafficPolicy: Local IS REMOVED, and removing it is required rather
+  # than tidy. It routed a caller to the licence-manager pod on its OWN node,
+  # which is what you want from a DaemonSet and fatal for a Deployment: every
+  # node without a replica would have no endpoint at all, so api and the gateway
+  # on those nodes could not reach the licence manager.

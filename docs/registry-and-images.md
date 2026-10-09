@@ -51,8 +51,8 @@ dedicated `$ACR_RG` separate from the cluster RG.
 
 ## Sizing the SKU
 
-The eight supplied build0031 Docker archives total 21.29 GB
-(19.83 GiB) on disk. This is the size of the supplied tar files, not a measured
+The ten supplied build0047 Docker archives total approximately 43 GiB
+on disk. This is the size of the supplied tar files, not a measured
 ACR storage bill: it stores layers differently from Docker tar archives.
 Monitor usage after import and review [Azure's current SKU limits](https://learn.microsoft.com/en-us/azure/container-registry/container-registry-skus)
 before choosing a tier.
@@ -88,10 +88,11 @@ export ACR_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 export ACR_NAME="fortiaigateacr$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom | head -c 9; echo)"
 export ACR_SKU="Standard"     # or Premium
 export IMAGE_PREFIX="fortiaigate"
-export BUILD="build0031"      # supplied image archives and Helm chart
-export TAG="V8.0.1-${BUILD}"
-export TRITON_TAG="25.11-onnx-trt-agt-s1"
-export TRITON_MODELS_TAG="0.1.6-s1"
+export BUILD="build0047"      # supplied image archives and Helm chart
+export TAG="V8.0.2-${BUILD}"
+export TRITON_TAG="25.11-onnx-trt-agt-rpt-s1"
+export TRITON_MODELS_TAG="0.0.4-s1"
+export VLLM_TAG="0.28.0-rpt-s1"
 ```
 
 Validate the ACR name (5-50 alphanumerics, globally unique):
@@ -142,37 +143,38 @@ az role assignment create \
 
 ## Step 3 — Load and push the image archives
 
-The eight image archives and
-`FAIG_helm_chart-V8.0.1-build0031-FORTINET.tar.gz` should be downloaded to a preferred location.
+The ten image archives and
+`FAIG_helm_chart-V8.0.2-build0047-FORTINET.tar.gz` should be downloaded to a preferred location.
 
 The deployment chart requires these repositories under `IMAGE_PREFIX`:
 
-| Repository | Tag for build0031 | Used by |
+| Repository | Tag for build0047 | Used by |
 |------------|-------------------|---------|
-| `api`, `core`, `webui`, `logd`, `license_manager`, `scanner` | `V8.0.1-build0031` | Application services |
-| `custom-triton` | `25.11-onnx-trt-agt-s1` | Triton server, when GPU is enabled |
-| `triton-models` | `0.1.6-s1` | Triton model loader, when GPU is enabled |
+| `api`, `webui`, `llm-gateway`, `guardrail`, `guardrail-scanner`, `logd`, `license_manager` | `V8.0.2-build0047` | Application services |
+| `custom-triton` | `25.11-onnx-trt-agt-rpt-s1` | Triton server in CPU/GPU profiles |
+| `faig-models` | `0.0.4-s1` | Combined encrypted model loader for Triton and vLLM |
+| `vllm-server` | `0.28.0-rpt-s1` | Policy model server and shared-mode GPU probe |
 
-All eight archive manifests use the source repository prefix
+All ten archive manifests use the source repository prefix
 `dops-jfrog.fortinet-us.com/docker-fortiaigate-local` with the names and tags
-above. The extracted Helm chart renders those same eight references when its
+above. The extracted Helm chart renders those same ten references when its
 application repository is set. Its bundled PostgreSQL and Redis images are
 listed separately below.
 
-This AKS chart now uses the extracted 8.0.1/build0031 model configuration and
+This AKS chart now uses the extracted 8.0.2/build0047 model configuration and
 application settings while retaining AKS-specific GPU placement, ingress,
-license/TLS ownership, and storage behavior. The upstream archive is therefore
+deployment licensing, separate TLS, persistent secret ownership, and storage behavior. The upstream archive is therefore
 still **not** a direct drop-in replacement. Image and offline chart checks do
 not establish runtime compatibility until a live AKS deployment is tested.
 
 The pattern for each image is `docker load → docker tag → docker push`:
 
 ```bash
-export IMAGES_DIR="<location where images downloaded"
+export IMAGES_DIR="<directory containing the supplied image archives>"
 export ACR_PREFIX="${ACR_NAME}.azurecr.io/${IMAGE_PREFIX}"
 
 # Stop before any push if the verified archives are missing.
-for img in api core webui logd license_manager scanner custom-triton triton-models; do
+for img in api webui llm-gateway guardrail guardrail-scanner logd license_manager custom-triton faig-models vllm-server; do
   test -f "${IMAGES_DIR}/FAIG_${img}-${TAG}-FORTINET.tar" || {
     echo "Missing ${IMAGES_DIR}/FAIG_${img}-${TAG}-FORTINET.tar; check the supplied archive names" >&2
     exit 1
@@ -199,22 +201,25 @@ push_archive() {
   docker push "${ACR_PREFIX}/${name}:${dest_tag}"
 }
 
-# Versioned FortiAIGate images (api/core/webui/logd/license_manager/scanner)
-for img in api core webui logd license_manager scanner; do
+# Versioned application images
+for img in api webui llm-gateway guardrail guardrail-scanner logd license_manager; do
   push_archive "$img" "$TAG" || exit 1
 done
 
 # Custom Triton (different tag scheme)
 push_archive custom-triton "$TRITON_TAG" || exit 1
 
-# Triton models repo (different tag scheme)
-push_archive triton-models "$TRITON_MODELS_TAG" || exit 1
+# Combined model carrier (different tag scheme)
+push_archive faig-models "$TRITON_MODELS_TAG" || exit 1
+
+# vLLM server and shared-mode GPU probe (different tag scheme)
+push_archive vllm-server "$VLLM_TAG" || exit 1
 ```
 
 Notes:
 
 - Triton tags are independent of the application tag. Check the loaded image
-  references and match all three Terraform tag variables to the pushed tags.
+  references and match all four Terraform tag variables to the pushed tags.
 - These archives may be large. On a slow connection, run from an Azure VM in
   the same region as the ACR to push over the Azure backbone instead.
 - ACR does not require pre-creating repositories — the path
@@ -228,21 +233,22 @@ List what's in the registry:
 az acr repository list --name "$ACR_NAME" -o table
 
 # For each repo, show the tags
-for repo in api core webui logd license_manager scanner custom-triton triton-models; do
+for repo in api webui llm-gateway guardrail guardrail-scanner logd license_manager custom-triton faig-models vllm-server; do
   echo "=== ${repo} ==="
   az acr repository show-tags --name "$ACR_NAME" --repository "${IMAGE_PREFIX}/${repo}" -o tsv
 done
 ```
 
-You should see all eight repos under `fortiaigate/` with the exact tags in the
+You should see all ten repos under `fortiaigate/` with the exact tags in the
 table above. Set the Terraform variables to the same image set:
 
 ```hcl
 # tfvars/dev.tfvars
 image_repository = "fortiaigateacrXXXX.azurecr.io/fortiaigate"
-image_tag                = "V8.0.1-build0031"
-triton_image_tag         = "25.11-onnx-trt-agt-s1"
-triton_models_image_tag  = "0.1.6-s1"
+image_tag                = "V8.0.2-build0047"
+triton_image_tag         = "25.11-onnx-trt-agt-rpt-s1"
+triton_models_image_tag  = "0.0.4-s1"
+vllm_image_tag           = "0.28.0-rpt-s1"
 ```
 
 ## Alternative: `az acr import` instead of pull/load/push
@@ -263,7 +269,7 @@ This bypasses the local `docker load`/`docker push` round-trip
 entirely and is the fastest path when the source is reachable. The
 `.tar` archives, when supplied, are the distribution mechanism for sites
 that cannot reach Fortinet's registry directly. If you have direct access,
-`az acr import` is an alternative. The eight archive manifests confirm the
+`az acr import` is an alternative. The ten archive manifests confirm the
 JFrog source prefix and tags in this example; direct source-registry access
 still depends on your credentials and network path.
 
@@ -281,15 +287,16 @@ still depends on your credentials and network path.
 ## What this stack does (and doesn't) consume from the registry
 
 `helm.tf` passes `var.image_repository` to `fortiaigate.image.repository`.
-The chart appends each image name (`/api`, `/core`, `/scanner`, etc.). Set
-`image_tag` for the application images, `triton_image_tag` for `custom-triton`,
-and `triton_models_image_tag` for `triton-models` in your tfvars. Their defaults
-are `V8.0.1-build0031`, `25.11-onnx-trt-agt-s1`, and `0.1.6-s1`, respectively.
-The defaults now select build0031; set all three variables explicitly for
-later builds. Terraform `set` blocks
-take precedence over `extra_values_files` for these image settings.
+The chart appends each image name (`/api`, `/llm-gateway`, `/guardrail`, etc.).
+Set `image_tag` for application images, `triton_image_tag` for `custom-triton`,
+`triton_models_image_tag` for the combined `faig-models` carrier, and
+`vllm_image_tag` for `vllm-server`. Defaults are `V8.0.2-build0047`,
+`25.11-onnx-trt-agt-rpt-s1`, `0.0.4-s1`, and `0.28.0-rpt-s1`. Qualify them as
+one release set. Terraform `set` blocks take precedence over extra values files.
+The optional DP agent image is absent from this bundle and Terraform keeps it
+disabled. See [the compatibility audit](build0047-compatibility.md).
 
-The eight FortiAIGate repositories are not the complete set of images pulled
+The ten FortiAIGate repositories are not the complete set of images pulled
 by AKS. With the bundled databases enabled, the current chart also renders
 `docker.io/bitnamilegacy/postgresql:17.4.0-debian-12-r19`,
 `docker.io/bitnamilegacy/redis:8.2.0-debian-12-r0`, and
