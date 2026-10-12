@@ -90,6 +90,7 @@ helm-template*.yaml
 Thumbs.db
 .vscode/
 .idea/
+codex-sessions
 
 # Python cache if helper scripts are used locally
 __pycache__/
