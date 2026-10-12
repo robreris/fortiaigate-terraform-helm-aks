@@ -122,3 +122,11 @@ storage_account_kind = "FileStorage"
 # tls_certificate_path    = "/secure/certs/fortiaigate-fullchain.pem"
 # tls_private_key_path    = "/secure/certs/fortiaigate.key"
 # tls_ca_certificate_path = "/secure/certs/company-root-ca.pem" # Private CA only
+
+# Existing networking (all IDs in the deployment subscription and region).
+# Leave unset to create networking. See docs/existing-network.md.
+# existing_vnet_id         = "/subscriptions/<subscription-id>/resourceGroups/<network-rg>/providers/Microsoft.Network/virtualNetworks/<vnet>"
+# existing_aks_subnet_id   = "/subscriptions/<subscription-id>/resourceGroups/<network-rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<aks-subnet>"
+# existing_appgw_subnet_id = "/subscriptions/<subscription-id>/resourceGroups/<network-rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<appgw-subnet>"
+# service_cidr   = "10.1.0.0/16"
+# dns_service_ip = "10.1.0.10"

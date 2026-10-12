@@ -99,6 +99,12 @@ Bootstrap the GPU pool with the infrastructure when enabled so inference can
 schedule during the full apply. Build0047 does not require node-name discovery
 or per-node license files between these steps.
 
+## Existing networking
+
+To deploy into an externally managed VNet and subnets, supply the existing
+network resource IDs. See [Existing VNet and subnets](docs/existing-network.md)
+for inputs, permissions, network prerequisites, and bootstrap steps.
+
 ## Per-subscription layout
 
 State, backend, and variables are partitioned by Azure subscription:
@@ -239,6 +245,7 @@ No modules.
 | [azurerm_role_assignment.agic_appgw_contributor](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/role_assignment) | resource |
 | [azurerm_role_assignment.agic_appgw_subnet_network_contributor](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/role_assignment) | resource |
 | [azurerm_role_assignment.agic_rg_reader](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/role_assignment) | resource |
+| [azurerm_role_assignment.aks_subnet_network_contributor](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/role_assignment) | resource |
 | [azurerm_role_assignment.cert_manager_dns](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/role_assignment) | resource |
 | [azurerm_role_assignment.cluster_storage_contributor](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/role_assignment) | resource |
 | [azurerm_role_assignment.kubelet_acr_pull](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/role_assignment) | resource |
@@ -247,6 +254,7 @@ No modules.
 | [azurerm_storage_account.fortiaigate](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/storage_account) | resource |
 | [azurerm_subnet.aks](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/subnet) | resource |
 | [azurerm_subnet.appgw](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/subnet) | resource |
+| [azurerm_user_assigned_identity.aks_network](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/user_assigned_identity) | resource |
 | [azurerm_user_assigned_identity.cert_manager](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/user_assigned_identity) | resource |
 | [azurerm_virtual_network.this](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/virtual_network) | resource |
 | [helm_release.cert_manager](https://registry.terraform.io/providers/hashicorp/helm/latest/docs/resources/release) | resource |
@@ -267,6 +275,7 @@ No modules.
 | [random_password.postgresql_user](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/password) | resource |
 | [random_password.redis](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/password) | resource |
 | [random_string.storage_suffix](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/string) | resource |
+| [terraform_data.network_configuration](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
 | [terraform_data.tls_configuration](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
 | [tls_cert_request.fortiaigate](https://registry.terraform.io/providers/hashicorp/tls/latest/docs/resources/cert_request) | resource |
 | [tls_locally_signed_cert.fortiaigate](https://registry.terraform.io/providers/hashicorp/tls/latest/docs/resources/locally_signed_cert) | resource |
@@ -275,6 +284,9 @@ No modules.
 | [tls_self_signed_cert.ca](https://registry.terraform.io/providers/hashicorp/tls/latest/docs/resources/self_signed_cert) | resource |
 | [azurerm_client_config.current](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/data-sources/client_config) | data source |
 | [azurerm_dns_zone.this](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/data-sources/dns_zone) | data source |
+| [azurerm_subnet.aks](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/data-sources/subnet) | data source |
+| [azurerm_subnet.appgw](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/data-sources/subnet) | data source |
+| [azurerm_virtual_network.existing](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/data-sources/virtual_network) | data source |
 | [kubernetes_ingress_v1.fortiaigate](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/data-sources/ingress_v1) | data source |
 
 ## Inputs
@@ -295,8 +307,12 @@ No modules.
 | <a name="input_cert_manager_version"></a> [cert\_manager\_version](#input\_cert\_manager\_version) | cert-manager Helm chart version to install (e.g. 'v1.16.2'). Use a release that supports Azure workload identity for the DNS-01 solver (v1.11+). | `string` | `"v1.16.2"` | no |
 | <a name="input_cluster_name"></a> [cluster\_name](#input\_cluster\_name) | AKS cluster name | `string` | `"fortiaigate"` | no |
 | <a name="input_db_storage_class"></a> [db\_storage\_class](#input\_db\_storage\_class) | StorageClass for the bundled PostgreSQL and Redis PVCs. Must be a block (Azure Disk, RWO) class — PostgreSQL cannot initialize its data dir on the shared Azure Files (SMB) class. 'managed-csi' (Standard SSD) ships with AKS; use 'managed-csi-premium' for Premium SSD. | `string` | `"managed-csi"` | no |
+| <a name="input_dns_service_ip"></a> [dns\_service\_ip](#input\_dns\_service\_ip) | Kubernetes DNS service IPv4 address inside service\_cidr. | `string` | `"10.1.0.10"` | no |
 | <a name="input_dns_zone_name"></a> [dns\_zone\_name](#input\_dns\_zone\_name) | Name of the existing public Azure DNS zone cert-manager writes the \_acme-challenge TXT records into (e.g. 'example.com'). Required when letsencrypt\_enabled = true. | `string` | `""` | no |
 | <a name="input_dns_zone_resource_group"></a> [dns\_zone\_resource\_group](#input\_dns\_zone\_resource\_group) | Resource group containing the Azure DNS zone (var.dns\_zone\_name). May differ from the cluster RG (e.g. an App Service Domains zone). The Terraform principal needs role-assignment write on this scope to grant cert-manager DNS Zone Contributor. Required when letsencrypt\_enabled = true. | `string` | `""` | no |
+| <a name="input_existing_aks_subnet_id"></a> [existing\_aks\_subnet\_id](#input\_existing\_aks\_subnet\_id) | Existing aks subnet resource ID. Set all existing network IDs together (gateway subnet optional when AGIC is disabled). External networking remains outside this stack's ownership. | `string` | `""` | no |
+| <a name="input_existing_appgw_subnet_id"></a> [existing\_appgw\_subnet\_id](#input\_existing\_appgw\_subnet\_id) | Existing appgw subnet resource ID. Set all existing network IDs together (gateway subnet optional when AGIC is disabled). External networking remains outside this stack's ownership. | `string` | `""` | no |
+| <a name="input_existing_vnet_id"></a> [existing\_vnet\_id](#input\_existing\_vnet\_id) | Existing vnet resource ID. Set all existing network IDs together (gateway subnet optional when AGIC is disabled). External networking remains outside this stack's ownership. | `string` | `""` | no |
 | <a name="input_extra_values_files"></a> [extra\_values\_files](#input\_extra\_values\_files) | Additional Helm values YAML files to merge (applied left-to-right, later files take precedence) | `list(string)` | `[]` | no |
 | <a name="input_gpu_enabled"></a> [gpu\_enabled](#input\_gpu\_enabled) | Add a GPU pool for Triton and vLLM. When false, Triton still renders without GPU allocation and vLLM is disabled; POLICY detectors require vLLM and fail closed without it. CPU capabilities need live qualification. | `bool` | `false` | no |
 | <a name="input_gpu_node_count"></a> [gpu\_node\_count](#input\_gpu\_node\_count) | Fixed GPU pool size. Dedicated Triton/vLLM mode needs enough cards for both engines (normally at least two one-GPU nodes). | `number` | `1` | no |
@@ -315,6 +331,7 @@ No modules.
 | <a name="input_location"></a> [location](#input\_location) | Azure region to deploy into | `string` | `"eastus"` | no |
 | <a name="input_namespace"></a> [namespace](#input\_namespace) | Kubernetes namespace for the FortiAIGate deployment | `string` | `"fortiaigate"` | no |
 | <a name="input_resource_group_name"></a> [resource\_group\_name](#input\_resource\_group\_name) | Resource group that will contain the AKS cluster and all dependent resources | `string` | `"fortiaigate"` | no |
+| <a name="input_service_cidr"></a> [service\_cidr](#input\_service\_cidr) | Kubernetes service CIDR; must not overlap the VNet or connected networks. | `string` | `"10.1.0.0/16"` | no |
 | <a name="input_storage_account_kind"></a> [storage\_account\_kind](#input\_storage\_account\_kind) | Storage account kind. Use 'FileStorage' (Premium) for low-latency Azure Files; 'StorageV2' for Standard tier. | `string` | `"FileStorage"` | no |
 | <a name="input_storage_account_tier"></a> [storage\_account\_tier](#input\_storage\_account\_tier) | Storage account tier backing Azure Files. 'Premium' is required for FileStorage kind (low-latency SMB/NFS); 'Standard' works only with StorageV2. | `string` | `"Premium"` | no |
 | <a name="input_storage_size"></a> [storage\_size](#input\_storage\_size) | Size of the shared Azure Files-backed PVC | `string` | `"100Gi"` | no |

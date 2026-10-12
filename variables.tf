@@ -354,3 +354,56 @@ variable "cert_manager_version" {
   type        = string
   default     = "v1.16.2"
 }
+
+variable "existing_vnet_id" {
+  description = "Existing vnet resource ID. Set all existing network IDs together (gateway subnet optional when AGIC is disabled). External networking remains outside this stack's ownership."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.existing_vnet_id == "" || can(regex("(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.Network/virtualNetworks/[^/]+$", var.existing_vnet_id))
+    error_message = "existing_vnet_id must be empty or a full Azure virtualNetworks resource ID."
+  }
+}
+
+variable "existing_aks_subnet_id" {
+  description = "Existing aks subnet resource ID. Set all existing network IDs together (gateway subnet optional when AGIC is disabled). External networking remains outside this stack's ownership."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.existing_aks_subnet_id == "" || can(regex("(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.Network/virtualNetworks/[^/]+/subnets/[^/]+$", var.existing_aks_subnet_id))
+    error_message = "existing_aks_subnet_id must be empty or a full Azure subnets resource ID."
+  }
+}
+
+variable "existing_appgw_subnet_id" {
+  description = "Existing appgw subnet resource ID. Set all existing network IDs together (gateway subnet optional when AGIC is disabled). External networking remains outside this stack's ownership."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.existing_appgw_subnet_id == "" || can(regex("(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.Network/virtualNetworks/[^/]+/subnets/[^/]+$", var.existing_appgw_subnet_id))
+    error_message = "existing_appgw_subnet_id must be empty or a full Azure subnets resource ID."
+  }
+}
+
+variable "service_cidr" {
+  description = "Kubernetes service CIDR; must not overlap the VNet or connected networks."
+  type        = string
+  default     = "10.1.0.0/16"
+  validation {
+    condition     = can(cidrnetmask(var.service_cidr))
+    error_message = "service_cidr must be an IPv4 CIDR."
+  }
+}
+
+variable "dns_service_ip" {
+  description = "Kubernetes DNS service IPv4 address inside service_cidr."
+  type        = string
+  default     = "10.1.0.10"
+  validation {
+    condition     = can(cidrnetmask("${var.dns_service_ip}/32"))
+    error_message = "dns_service_ip must be an IPv4 address."
+  }
+}

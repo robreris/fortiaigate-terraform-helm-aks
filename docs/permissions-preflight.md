@@ -18,6 +18,10 @@ this stack creates.
 
 **Bottom line:** the SP needs **`Contributor` + `User Access Administrator`** on the target subscription (or RG), or just **`Owner`**. `Contributor` alone is **not** enough — it cannot create the role assignments in `storage.tf` and `aks.tf`.
 
+For an externally managed VNet, deployment-resource-group permissions alone
+are insufficient: access and role-assignment rights are also needed on the
+existing subnets. See [Existing networking](existing-network.md).
+
 ## Step 1 — Log in as the SP
 
 ```bash

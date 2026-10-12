@@ -18,7 +18,7 @@
 
 locals {
   appgw_byo               = var.agic_enabled && var.internal
-  appgw_private_ip        = var.appgw_private_ip != "" ? var.appgw_private_ip : cidrhost(var.appgw_subnet_cidr, -2)
+  appgw_private_ip        = var.appgw_private_ip != "" ? var.appgw_private_ip : cidrhost(local.appgw_subnet_cidr, -2)
   appgw_trusted_root_name = "fortiaigate-ca"
 }
 
@@ -33,6 +33,8 @@ resource "azurerm_public_ip" "appgw" {
 }
 
 resource "azurerm_application_gateway" "this" {
+  depends_on = [terraform_data.network_configuration]
+
   count = local.appgw_byo ? 1 : 0
 
   name                = "${var.cluster_name}-appgw"
@@ -55,7 +57,7 @@ resource "azurerm_application_gateway" "this" {
 
   gateway_ip_configuration {
     name      = "appgw-ip-config"
-    subnet_id = azurerm_subnet.appgw.id
+    subnet_id = local.appgw_subnet_id
   }
 
   # Generated or supplied private web CA, so the gateway trusts HTTPS backends.
@@ -77,7 +79,7 @@ resource "azurerm_application_gateway" "this" {
   # v2 requires a static private frontend address from the gateway subnet.
   frontend_ip_configuration {
     name                          = "appgw-private-frontend"
-    subnet_id                     = azurerm_subnet.appgw.id
+    subnet_id                     = local.appgw_subnet_id
     private_ip_address_allocation = "Static"
     private_ip_address            = local.appgw_private_ip
   }

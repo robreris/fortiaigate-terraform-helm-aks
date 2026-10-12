@@ -1,4 +1,6 @@
 resource "azurerm_kubernetes_cluster" "this" {
+  depends_on = [terraform_data.network_configuration, azurerm_role_assignment.aks_subnet_network_contributor]
+
   name                = var.cluster_name
   location            = azurerm_resource_group.this.location
   resource_group_name = azurerm_resource_group.this.name
@@ -21,7 +23,7 @@ resource "azurerm_kubernetes_cluster" "this" {
     max_count            = var.app_node_count
     auto_scaling_enabled = true
     max_pods             = var.app_node_max_pods
-    vnet_subnet_id       = azurerm_subnet.aks.id
+    vnet_subnet_id       = local.aks_subnet_id
     os_disk_size_gb      = var.app_node_disk_size_gb
     node_labels = {
       fortiaigate-role = "app"
@@ -29,14 +31,15 @@ resource "azurerm_kubernetes_cluster" "this" {
   }
 
   identity {
-    type = "SystemAssigned"
+    type         = local.existing_network ? "UserAssigned" : "SystemAssigned"
+    identity_ids = local.existing_network ? [azurerm_user_assigned_identity.aks_network[0].id] : null
   }
 
   network_profile {
     network_plugin = "azure"
     network_policy = "azure"
-    service_cidr   = "10.1.0.0/16"
-    dns_service_ip = "10.1.0.10"
+    service_cidr   = var.service_cidr
+    dns_service_ip = var.dns_service_ip
   }
 
   # AGIC addon. Public mode (internal = false): AKS creates and manages the
@@ -49,7 +52,7 @@ resource "azurerm_kubernetes_cluster" "this" {
     content {
       gateway_id   = local.appgw_byo ? azurerm_application_gateway.this[0].id : null
       gateway_name = local.appgw_byo ? null : "${var.cluster_name}-appgw"
-      subnet_id    = local.appgw_byo ? null : azurerm_subnet.appgw.id
+      subnet_id    = local.appgw_byo ? null : local.appgw_subnet_id
     }
   }
 
@@ -69,7 +72,7 @@ resource "azurerm_kubernetes_cluster" "this" {
 resource "azurerm_role_assignment" "agic_appgw_subnet_network_contributor" {
   count = var.agic_enabled ? 1 : 0
 
-  scope                            = azurerm_subnet.appgw.id
+  scope                            = local.appgw_subnet_id
   role_definition_name             = "Network Contributor"
   principal_id                     = azurerm_kubernetes_cluster.this.ingress_application_gateway[0].ingress_application_gateway_identity[0].object_id
   skip_service_principal_aad_check = true
@@ -85,7 +88,7 @@ resource "azurerm_kubernetes_cluster_node_pool" "gpu" {
   name                  = "gpu"
   kubernetes_cluster_id = azurerm_kubernetes_cluster.this.id
   vm_size               = var.gpu_node_vm_size
-  vnet_subnet_id        = azurerm_subnet.aks.id
+  vnet_subnet_id        = local.aks_subnet_id
   os_disk_size_gb       = var.gpu_node_disk_size_gb
 
   # Pin the AKS-managed NVIDIA driver install. azurerm records this as "Install"
