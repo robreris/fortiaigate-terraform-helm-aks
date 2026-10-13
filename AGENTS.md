@@ -17,6 +17,7 @@ This guidance applies to coding agents working in this repository.
 
 - [README](README.md): deployment overview, two-step bootstrap, subscription layout, variables, and teardown.
 - [Contributing](CONTRIBUTING.md): local checks, generated README tables, and PR requirements.
+- [8.0.1 to 8.0.2 upgrade](docs/upgrade-8.0.1-to-8.0.2.md): migration prerequisites, secret adoption, cutover, and recovery.
 - [Operations and upgrades](docs/operations.md): credential adoption, licensing, storage constraints, and rollout behavior.
 - [Application Gateway, DNS, and TLS](docs/application-gateway-dns-tls.md): gateway ownership, private ingress, and backend trust.
 - [Supplied certificates](docs/tls-supplied.md) and [Let's Encrypt](docs/tls-letsencrypt.md): web/internal TLS separation and renewal.

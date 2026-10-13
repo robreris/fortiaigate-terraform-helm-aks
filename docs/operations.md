@@ -5,6 +5,10 @@ This guide covers troubleshooting and changes to an existing deployment.
 Review a saved Terraform plan before applying upgrades, and follow
 [the deployment test checklist](testing.md) in a disposable environment first.
 
+For the build0031-to-build0047 transition, follow the
+[8.0.1-to-8.0.2 upgrade guide](upgrade-8.0.1-to-8.0.2.md), including secret
+adoption and the application migration prerequisites before any full apply.
+
 ## PostgreSQL credential ownership and adoption
 
 Terraform owns `random_password.postgresql_user`,

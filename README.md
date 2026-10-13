@@ -155,7 +155,8 @@ The build0047 port targets fresh installations. It replaces core/scanners with
 LLM gateway/guardrail services and routes `/ai` to the gateway, `/api/` to API,
 and `/ui` plus `/` to webui. It includes vLLM and deployment licensing.
 Existing deployment upgrades, database migration, and licensing conversion are
-not qualified; use [the compatibility audit](docs/build0047-compatibility.md).
+not qualified; use [the 8.0.1-to-8.0.2 upgrade guide](docs/upgrade-8.0.1-to-8.0.2.md)
+and [the compatibility audit](docs/build0047-compatibility.md).
 Offline tests do not establish live AKS or model compatibility.
 
 Terraform owns the local `fortiaigate` Helm release. `helm.tf` passes the
@@ -176,6 +177,7 @@ tfvars example is a starting configuration, not a high-availability guarantee.
 ## Documentation
 
 - [8.0.2 build0047 compatibility audit](docs/build0047-compatibility.md) — planned AKS port, verified image tags, and validation gaps.
+- [8.0.1 to 8.0.2 upgrade](docs/upgrade-8.0.1-to-8.0.2.md) — branch comparison, secret adoption, migration prerequisites, cutover, and recovery.
 - [Operations and upgrades](docs/operations.md) — credential adoption, licensing, storage constraints, and rollouts.
 - [Supplied TLS certificates](docs/tls-supplied.md) — use your own certificate while retaining internal database TLS.
 - [Application Gateway, DNS, and TLS](docs/application-gateway-dns-tls.md) — Azure equivalent of ALB + Route 53 + ACM.

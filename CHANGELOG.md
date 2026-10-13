@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Document the 8.0.1/build0031 to 8.0.2/build0047 branch comparison, live secret adoption, migration prerequisites, staged cutover, and recovery limits.
+
 - Support externally owned VNets and AKS/Application Gateway subnets, pre-grant AKS network access, and configure Kubernetes service/DNS ranges. Preserve managed-network state with moved declarations.
 
 - Port FortiAIGate 8.0.2/build0047 for fresh AKS installations: LLM gateway/guardrail services, explicit shared/dedicated Triton/vLLM layouts, and deployment licensing.

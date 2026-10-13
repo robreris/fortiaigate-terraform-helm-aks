@@ -67,6 +67,10 @@ two-step bootstrap. These operations create billable Azure resources.
 
 ## Existing deployment review
 
+Use the [8.0.1-to-8.0.2 upgrade guide](upgrade-8.0.1-to-8.0.2.md) for the
+branch comparison, staged secret adoption, and rehearsal/recovery checklist.
+That documentation does not establish a qualified live upgrade.
+
 Build0047 targets fresh installations. Database migration and conversion from
 node-keyed licensing are not qualified; use [the compatibility audit](build0047-compatibility.md).
 

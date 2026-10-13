@@ -168,6 +168,10 @@ CPU-only and dedicated-GPU profiles need their own recorded capability results.
 
 ## Existing deployment upgrades remain a separate milestone
 
+The [8.0.1-to-8.0.2 upgrade guide](upgrade-8.0.1-to-8.0.2.md) records the
+current branch comparison and staged preparation/cutover procedure. It does not
+change the qualification status described here.
+
 The supplied chart and image manifests do not establish a supported migration
 from build0031. Obtain release migration guidance and qualify database schema
 changes, deployment license conversion, credential encryption, retired detector
