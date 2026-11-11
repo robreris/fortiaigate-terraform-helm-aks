@@ -1,5 +1,7 @@
 # Operations and upgrades
 
+For 8.0.3 build 6207, see the [AKS port and upgrade validation notes](build6207-compatibility.md).
+
 Use the [README](../README.md) for the two-step first deployment; use [staged teardown](teardown.md) for removal.
 This guide covers troubleshooting and changes to an existing deployment.
 Review a saved Terraform plan before applying upgrades, and follow

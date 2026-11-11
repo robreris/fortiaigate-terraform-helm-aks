@@ -10,6 +10,8 @@ Shared application data uses an Azure Files RWX claim. PostgreSQL and Redis each
 
 ## Bootstrap and updates
 
+For 8.0.3 preparation on `v803`, [stage the images in ACR](registry-build6207.md) and review the [AKS chart port status](build6207-compatibility.md) before changing deployment tfvars.
+
 The first deployment requires the infrastructure targets in the quickstart before the full application apply so the Kubernetes and Helm providers can reach AKS. Licensing requires no intermediate node discovery. Subsequent updates normally use a full plan/apply with the same backend and tfvars; targeting is reserved for initial bootstrap and staged teardown.
 
 For build0047 to build0055, follow [the port and upgrade notes](build0055-compatibility.md). For older 8.0.1 data, first read [the migration prerequisites](upgrade-8.0.1-to-8.0.2.md); a successful infrastructure plan does not qualify database migration.

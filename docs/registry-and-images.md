@@ -1,5 +1,7 @@
 # Container registry and image upload (Azure)
 
+Use the [build 6207 ACR staging guide](registry-build6207.md) for FortiAIGate 8.0.3. The archive names, tags, and upload examples below apply to build 0055.
+
 This stack expects the FortiAIGate container images to already exist in
 a registry referenced by `var.image_repository` (e.g.
 `<acrname>.azurecr.io/fortiaigate`). The Terraform here does **not**

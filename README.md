@@ -10,6 +10,8 @@ The local Helm chart is based on the downloaded FortiAIGate 8.0.2/build0055
 chart, with AKS-specific ingress, storage, TLS, license, and GPU placement
 patches. The default application and Triton image tags match build0055.
 
+On the `v803` branch, [stage the 8.0.3 build 6207 images in ACR](docs/registry-build6207.md) and follow the [AKS chart port notes](docs/build6207-compatibility.md). The quickstart below currently deploys 8.0.2 build 0055. Use `main` for 8.0.2 deployments.
+
 ## What you get
 
 - A resource group holding the VNet, AKS cluster, Azure Files storage account, and (optionally) the Application Gateway.
@@ -130,6 +132,7 @@ tfvars example is a starting configuration, not a high-availability guarantee.
 
 ## Documentation
 
+- [Build 6207 ACR staging](docs/registry-build6207.md) and [8.0.3 AKS port notes](docs/build6207-compatibility.md).
 - [Build0055 port and upgrade notes](docs/build0055-compatibility.md) — image inventory, upgrade expectations, and qualification gaps.
 - [Deployment and configuration](docs/deployment-guide.md) — architecture, common variables, and GPU tuning.
 - [Terraform reference](docs/terraform-reference.md) — generated inputs, resources, and outputs.

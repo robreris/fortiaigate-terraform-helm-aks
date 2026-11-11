@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add the verified FortiAIGate 8.0.3 build 6207 inventory, ACR upload script, staging instructions, and AKS chart port notes.
+
 - Automatically install generated or supplied private web CA roots on the public AGIC gateway with a named AzAPI update before Helm installs ingress; preserve the add-on gateway, other roots, and routing ownership. Add AzAPI 2.9, regression coverage, and upgrade/permission guidance.
 - Fix shared Azure Files provisioning permissions in existing-network mode by granting the user-assigned AKS control-plane identity; retain the storage role assignment's resource address and add regression assertions for both network modes.
 - Port the supplied FortiAIGate 8.0.2/build0055 chart changes and image defaults selectively; add verified chart/image fingerprints, GPU profiles, DLP batching controls, and gateway Base URL keepalive configuration.
